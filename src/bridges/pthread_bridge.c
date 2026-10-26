@@ -337,6 +337,43 @@ int pthread_create_bridge(pthread_t *out, const bionic_attr *battr, void *(*func
   return 0;
 }
 
+// pthread_t (a pthread-embedded handle) and the kernel thread UID that Mono
+// gets from gettid() are different values; signals are keyed by UID.
+#define MAX_SELF_MAP 64
+static struct {
+  pthread_t thread;
+  SceUID uid;
+} self_map[MAX_SELF_MAP];
+
+static void remember_self(void) {
+  pthread_t t = pthread_self();
+  SceUID uid = sceKernelGetThreadId();
+  for (int i = 0; i < MAX_SELF_MAP; i++) {
+    if (self_map[i].thread == t)
+      return;
+    if (!self_map[i].thread) {
+      self_map[i].thread = t;
+      self_map[i].uid = uid;
+      return;
+    }
+  }
+}
+
+SceUID pthread_bridge_uid_of(uint32_t id) {
+  SceKernelThreadInfo info;
+  info.size = sizeof(info);
+  if (sceKernelGetThreadInfo((SceUID)id, &info) >= 0)
+    return (SceUID)id;  // already a kernel UID (gettid/tkill)
+  thread_slot *s = slot_find((pthread_t)id);
+  if (s && s->uid)
+    return s->uid;
+  for (int i = 0; i < MAX_SELF_MAP; i++) {
+    if (self_map[i].thread == (pthread_t)id)
+      return self_map[i].uid;
+  }
+  return 0;
+}
+
 // Guest start routine of a thread created through pthread_create (for logs).
 uintptr_t pthread_bridge_entry_of(uint32_t thread) {
   thread_slot *s = slot_find((pthread_t)thread);
@@ -383,7 +420,10 @@ int pthread_join_bridge(pthread_t t, void **ret) {
   return pthread_join(t, ret);
 }
 void pthread_exit_bridge(void *ret) { pthread_exit(ret); }
-pthread_t pthread_self_bridge(void) { return pthread_self(); }
+pthread_t pthread_self_bridge(void) {
+  remember_self();
+  return pthread_self();
+}
 int pthread_equal_bridge(pthread_t a, pthread_t b) { return a == b; }
 
 int pthread_getschedparam_bridge(pthread_t t, int *policy, int *param) {

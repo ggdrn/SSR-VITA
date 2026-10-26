@@ -18,6 +18,7 @@
 
 int *__errno_bionic(void);
 uintptr_t pthread_bridge_entry_of(uint32_t thread);
+SceUID pthread_bridge_uid_of(uint32_t id);
 
 #define B_SIGILL 4
 #define B_SIGBUS 7
@@ -144,7 +145,7 @@ static sig_slot *slot_for(uint32_t thread, int create) {
   return create ? free_slot : NULL;
 }
 
-static uint32_t self_id(void) { return (uint32_t)pthread_self(); }
+static uint32_t self_id(void) { return (uint32_t)sceKernelGetThreadId(); }
 
 static void deliver_now(int sig) {
   bionic_siginfo info;
@@ -220,9 +221,15 @@ int signal_pending_self(void) {
 
 int signal_poll(void) { return deliver_pending(0); }
 
-int pthread_kill_bridge(uint32_t thread, int sig) {
+// Accepts a pthread_t or a kernel thread UID (Mono uses tkill(gettid())).
+int pthread_kill_bridge(uint32_t target, int sig) {
   if (sig == 0)
     return 0;
+  uint32_t thread = (uint32_t)pthread_bridge_uid_of(target);
+  if (!thread) {
+    L_WARN("pthread_kill(%p, %d): unknown thread", (void *)target, sig);
+    return 3;  // ESRCH
+  }
   if (thread == self_id()) {
     deliver_now(sig);
     return 0;

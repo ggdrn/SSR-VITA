@@ -23,6 +23,7 @@ if grep -q "Cannot allocate .* SCE data at end of segment" build/last_build.log;
   cmake --build build -j8
 fi
 
-mkdir -p releases
-cp build/SRR-Vita-v*.vpk releases/ 2>/dev/null || true
-ls -1 build/*.vpk
+# Every VPK ever built is kept in build/VPK/.
+mkdir -p build/VPK
+cp build/SRR-Vita-v*.vpk build/VPK/
+ls -1 build/VPK/*.vpk

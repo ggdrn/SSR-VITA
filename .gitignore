@@ -1,5 +1,4 @@
 build/
-releases/
 *.apk
 *.vpk
 .DS_Store

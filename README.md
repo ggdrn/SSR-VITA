@@ -97,7 +97,8 @@ SRR - VITA/
 scripts/build.sh
 ```
 
-Cada execução incrementa o número de build e gera `build/SRR-Vita-v0.0.NN.vpk` (cópia em `releases/`).
+Cada execução incrementa o número de build e gera `build/SRR-Vita-v0.0.NN.vpk`; todos os VPKs ficam
+guardados em `build/VPK/`.
 No Vita o `param.sfo` só aceita `XX.YY`, então a mesma build aparece como `00.NN`.
 `scripts/build.sh --rebuild` recompila sem trocar o número.
 
