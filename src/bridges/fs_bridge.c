@@ -1,0 +1,52 @@
+// Android path layout -> Vita storage.
+//   /vita/<apk name>                     -> ux0:data/srr/<apk name>
+//   /data/data/<package>/...             -> ux0:data/srr/...
+//   /sdcard/..., /storage/emulated/0/... -> ux0:data/srr/sdcard/...
+
+#include "bridges.h"
+#include "../config.h"
+#include "../util/log.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <psp2/io/stat.h>
+
+static char apk_android_path[256];
+
+static const struct {
+  const char *android;
+  const char *vita;
+} mounts[] = {
+    {ANDROID_APK_DIR, DATA_PATH},
+    {ANDROID_DATA_DIR, DATA_PATH},
+    {"/storage/emulated/0", DATA_PATH "/sdcard"},
+    {ANDROID_SDCARD, DATA_PATH "/sdcard"},
+    {"/tmp", CACHE_PATH},
+};
+
+const char *fs_translate(const char *path, char *out, size_t out_size) {
+  if (!path || path[0] != '/')
+    return path;
+  for (size_t i = 0; i < sizeof(mounts) / sizeof(mounts[0]); i++) {
+    size_t n = strlen(mounts[i].android);
+    if (strncmp(path, mounts[i].android, n) == 0 && (path[n] == '/' || path[n] == 0)) {
+      snprintf(out, out_size, "%s%s", mounts[i].vita, path + n);
+      return out;
+    }
+  }
+  return path;
+}
+
+void fs_init(const char *apk_ux0_path) {
+  const char *name = strrchr(apk_ux0_path, '/');
+  snprintf(apk_android_path, sizeof(apk_android_path), ANDROID_APK_DIR "%s", name ? name : "/base.apk");
+
+  sceIoMkdir(FILES_PATH, 0777);
+  sceIoMkdir(CACHE_PATH, 0777);
+  sceIoMkdir(DATA_PATH "/sdcard", 0777);
+  sceIoMkdir(DATA_PATH "/sdcard/Android", 0777);
+  sceIoMkdir(DATA_PATH "/sdcard/Android/data", 0777);
+  L_INFO("fs: apk visible to the game as %s", apk_android_path);
+}
+
+const char *fs_apk_android_path(void) { return apk_android_path; }

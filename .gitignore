@@ -1,0 +1,6 @@
+build/
+releases/
+*.apk
+*.vpk
+.DS_Store
+__pycache__/
