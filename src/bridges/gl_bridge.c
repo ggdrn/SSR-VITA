@@ -139,7 +139,18 @@ const GLubyte *glGetString_bridge(GLenum name) {
   }
 }
 
-// Unity probes for binary shader support and other caps through glGetIntegerv.
+// vitaGL's glGet*iv leave the output untouched for names it doesn't know, so
+// the caller reads stack garbage (Unity once tried a 3.6 GB "Shader"
+// allocation sized by GL_ACTIVE_UNIFORM_BLOCKS). Outputs are zeroed first and
+// GLES3-only queries are answered here.
+
+#define GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH 0x8A35
+#define GL_ACTIVE_UNIFORM_BLOCKS 0x8A36
+#define GL_PROGRAM_BINARY_LENGTH_ 0x8741
+#define GL_TRANSFORM_FEEDBACK_VARYINGS 0x8C83
+#define GL_TRANSFORM_FEEDBACK_BUFFER_MODE 0x8C7F
+#define GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH 0x8C76
+
 void glGetIntegerv_bridge(GLenum pname, GLint *data) {
   switch (pname) {
   case 0x87FE:  // GL_NUM_PROGRAM_BINARY_FORMATS
@@ -147,9 +158,40 @@ void glGetIntegerv_bridge(GLenum pname, GLint *data) {
     *data = 0;
     break;
   default:
+    *data = 0;
     glGetIntegerv(pname, data);
     break;
   }
+}
+
+void glGetProgramiv_bridge(GLuint prog, GLenum pname, GLint *params) {
+  *params = 0;
+  switch (pname) {
+  case GL_ACTIVE_UNIFORM_BLOCKS:
+  case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
+  case GL_PROGRAM_BINARY_LENGTH_:  // no program binary cache: Unity recompiles
+  case GL_TRANSFORM_FEEDBACK_VARYINGS:
+  case GL_TRANSFORM_FEEDBACK_BUFFER_MODE:
+  case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH:
+    return;
+  default:
+    glGetProgramiv(prog, pname, params);
+  }
+}
+
+void glGetShaderiv_bridge(GLuint shader, GLenum pname, GLint *params) {
+  *params = 0;
+  glGetShaderiv(shader, pname, params);
+}
+
+void glGetVertexAttribiv_bridge(GLuint index, GLenum pname, GLint *params) {
+  *params = 0;
+  glGetVertexAttribiv(index, pname, params);
+}
+
+void glGetFramebufferAttachmentParameteriv_bridge(GLenum target, GLenum attachment, GLenum pname, GLint *params) {
+  *params = 0;
+  glGetFramebufferAttachmentParameteriv(target, attachment, pname, params);
 }
 
 // Not provided by vitaGL. Unity only uses sub-uploads of compressed textures

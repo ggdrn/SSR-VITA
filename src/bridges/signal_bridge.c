@@ -144,7 +144,19 @@ static void log_crash(KuKernelExceptionContext *ctx, const char *what) {
 }
 
 static void handle_exception(KuKernelExceptionContext *ctx, int sig, const char *what) {
-  if (!actions[sig].handler || actions[sig].handler == 1) {
+  // A guest handler that returns without fixing the fault (Unity's crash
+  // reporter chains back to the default action) would re-fault forever.
+  static uint32_t last_pc, last_far;
+  static int repeats;
+  if (ctx->pc == last_pc && ctx->FAR == last_far) {
+    repeats++;
+  } else {
+    last_pc = ctx->pc;
+    last_far = ctx->FAR;
+    repeats = 0;
+  }
+
+  if (!actions[sig].handler || actions[sig].handler == 1 || repeats >= 3) {
     log_crash(ctx, what);
     sceKernelExitProcess(0);
     return;

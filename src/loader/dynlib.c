@@ -285,17 +285,17 @@ extern void glGetActiveAttrib(void);
 extern void glGetActiveUniform(void);
 extern void glGetAttribLocation(void);
 extern void glGetError(void);
-extern void glGetFramebufferAttachmentParameteriv(void);
+extern void glGetFramebufferAttachmentParameteriv_bridge(void);
 extern void glGetIntegerv_bridge(void);
 extern void glGetProgramInfoLog(void);
-extern void glGetProgramiv(void);
+extern void glGetProgramiv_bridge(void);
 extern void glGetShaderInfoLog(void);
-extern void glGetShaderiv(void);
+extern void glGetShaderiv_bridge(void);
 extern void glGetString_bridge(void);
 extern void glGetTexParameteriv_bridge(void);
 extern void glGetUniformLocation(void);
 extern void glGetVertexAttribPointerv(void);
-extern void glGetVertexAttribiv(void);
+extern void glGetVertexAttribiv_bridge(void);
 extern void glLinkProgram_bridge(void);
 extern void glPixelStorei(void);
 extern void glPolygonOffset_sfp(void);
@@ -854,17 +854,17 @@ const so_default_dynlib default_dynlib[] = {
   {"glGetActiveUniform", (uintptr_t)&glGetActiveUniform},
   {"glGetAttribLocation", (uintptr_t)&glGetAttribLocation},
   {"glGetError", (uintptr_t)&glGetError},
-  {"glGetFramebufferAttachmentParameteriv", (uintptr_t)&glGetFramebufferAttachmentParameteriv},
+  {"glGetFramebufferAttachmentParameteriv", (uintptr_t)&glGetFramebufferAttachmentParameteriv_bridge},
   {"glGetIntegerv", (uintptr_t)&glGetIntegerv_bridge},
   {"glGetProgramInfoLog", (uintptr_t)&glGetProgramInfoLog},
-  {"glGetProgramiv", (uintptr_t)&glGetProgramiv},
+  {"glGetProgramiv", (uintptr_t)&glGetProgramiv_bridge},
   {"glGetShaderInfoLog", (uintptr_t)&glGetShaderInfoLog},
-  {"glGetShaderiv", (uintptr_t)&glGetShaderiv},
+  {"glGetShaderiv", (uintptr_t)&glGetShaderiv_bridge},
   {"glGetString", (uintptr_t)&glGetString_bridge},
   {"glGetTexParameteriv", (uintptr_t)&glGetTexParameteriv_bridge},
   {"glGetUniformLocation", (uintptr_t)&glGetUniformLocation},
   {"glGetVertexAttribPointerv", (uintptr_t)&glGetVertexAttribPointerv},
-  {"glGetVertexAttribiv", (uintptr_t)&glGetVertexAttribiv},
+  {"glGetVertexAttribiv", (uintptr_t)&glGetVertexAttribiv_bridge},
   {"glLinkProgram", (uintptr_t)&glLinkProgram_bridge},
   {"glPixelStorei", (uintptr_t)&glPixelStorei},
   {"glPolygonOffset", (uintptr_t)&glPolygonOffset_sfp},
