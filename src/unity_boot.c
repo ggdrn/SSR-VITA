@@ -111,6 +111,7 @@ int unity_run(void) {
   uint8_t (*render)(void *, jobj *) = native(UNITY_PLAYER, "nativeRender");
   if (!render)
     fatal_error("Unity did not register nativeRender.\nSee " LOG_PATH);
+  log_heap_usage("before render loop");
   L_INFO("unity: entering render loop");
   unsigned frame = 0;
   for (;;) {

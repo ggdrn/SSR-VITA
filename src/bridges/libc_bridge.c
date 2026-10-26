@@ -177,6 +177,8 @@ wint_t putwc_bridge(wchar_t c, void *f) {
 }
 
 int vfprintf_bridge(void *f, const char *fmt, va_list ap) {
+  char fixbuf[1024];
+  fmt = fmt_c99(fmt, fixbuf, sizeof(fixbuf));
   FILE *ff = F(f);
   if (is_std_stream(ff)) {
     log_vprintf(fmt, ap);
@@ -194,11 +196,15 @@ int fprintf_bridge(void *f, const char *fmt, ...) {
 }
 
 int vprintf_bridge(const char *fmt, va_list ap) {
+  char fixbuf[1024];
+  fmt = fmt_c99(fmt, fixbuf, sizeof(fixbuf));
   log_vprintf(fmt, ap);
   return 0;
 }
 
 int printf_bridge(const char *fmt, ...) {
+  char fixbuf[1024];
+  fmt = fmt_c99(fmt, fixbuf, sizeof(fixbuf));
   va_list ap;
   va_start(ap, fmt);
   log_vprintf(fmt, ap);
@@ -214,6 +220,8 @@ int puts_bridge(const char *s) {
 int putchar_bridge(int c) { return c; }
 
 int fscanf_bridge(void *f, const char *fmt, ...) {
+  char fixbuf[1024];
+  fmt = fmt_c99(fmt, fixbuf, sizeof(fixbuf));
   va_list ap;
   va_start(ap, fmt);
   int r = vfscanf(F(f), fmt, ap);
@@ -663,6 +671,8 @@ static const char *prio_name(int prio) {
 }
 
 int __android_log_print_bridge(int prio, const char *tag, const char *fmt, ...) {
+  char fixbuf[1024];
+  fmt = fmt_c99(fmt, fixbuf, sizeof(fixbuf));
   char buf[768];
   va_list ap;
   va_start(ap, fmt);
@@ -673,6 +683,8 @@ int __android_log_print_bridge(int prio, const char *tag, const char *fmt, ...) 
 }
 
 int __android_log_vprint_bridge(int prio, const char *tag, const char *fmt, va_list ap) {
+  char fixbuf[1024];
+  fmt = fmt_c99(fmt, fixbuf, sizeof(fixbuf));
   char buf[768];
   vsnprintf(buf, sizeof(buf), fmt, ap);
   log_printf("[%s/%s] %s", prio_name(prio), tag ? tag : "", buf);

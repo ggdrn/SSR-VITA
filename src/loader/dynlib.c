@@ -151,7 +151,7 @@ extern void atol(void);
 extern void bsd_signal_bridge(void);
 extern void bsearch(void);
 extern void btowc(void);
-extern void calloc(void);
+extern void calloc_bridge(void);
 extern void ceil(void);
 extern void ceilf(void);
 extern void chdir_bridge(void);
@@ -356,9 +356,9 @@ extern void longjmp(void);
 extern void lrand48(void);
 extern void lseek_bridge(void);
 extern void madvise_bridge(void);
-extern void malloc(void);
+extern void malloc_bridge(void);
 extern void mbrtowc(void);
-extern void memalign(void);
+extern void memalign_bridge(void);
 extern void memchr(void);
 extern void memcmp(void);
 extern void memcpy(void);
@@ -429,7 +429,7 @@ extern void raise_bridge(void);
 extern void read_bridge(void);
 extern void readdir_bridge(void);
 extern void readlink_bridge(void);
-extern void realloc(void);
+extern void realloc_bridge(void);
 extern void remove(void);
 extern void rename_bridge(void);
 extern void ret0_bridge(void);
@@ -461,12 +461,12 @@ extern void sinf(void);
 extern void sinh(void);
 extern void slCreateEngine_bridge(void);
 extern void sleep_bridge(void);
-extern void snprintf(void);
-extern void sprintf(void);
+extern void snprintf_bridge(void);
+extern void sprintf_bridge(void);
 extern void sqrt(void);
 extern void sqrtf(void);
 extern void srand48(void);
-extern void sscanf(void);
+extern void sscanf_bridge(void);
 extern void stat_bridge(void);
 extern void strcasecmp(void);
 extern void strcasestr(void);
@@ -514,11 +514,11 @@ extern void unlink(void);
 extern void unsetenv(void);
 extern void usleep_bridge(void);
 extern void utime_bridge(void);
-extern void vasprintf(void);
+extern void vasprintf_bridge(void);
 extern void vfprintf_bridge(void);
 extern void vprintf_bridge(void);
-extern void vsnprintf(void);
-extern void vsprintf(void);
+extern void vsnprintf_bridge(void);
+extern void vsprintf_bridge(void);
 extern void wcrtomb(void);
 extern void wcscoll(void);
 extern void wcsftime(void);
@@ -699,7 +699,7 @@ const so_default_dynlib default_dynlib[] = {
   {"bsd_signal", (uintptr_t)&bsd_signal_bridge},
   {"bsearch", (uintptr_t)&bsearch},
   {"btowc", (uintptr_t)&btowc},
-  {"calloc", (uintptr_t)&calloc},
+  {"calloc", (uintptr_t)&calloc_bridge},
   {"ceil", (uintptr_t)&ceil},
   {"ceilf", (uintptr_t)&ceilf},
   {"chdir", (uintptr_t)&chdir_bridge},
@@ -927,9 +927,9 @@ const so_default_dynlib default_dynlib[] = {
   {"lseek", (uintptr_t)&lseek_bridge},
   {"lstat", (uintptr_t)&stat_bridge},
   {"madvise", (uintptr_t)&madvise_bridge},
-  {"malloc", (uintptr_t)&malloc},
+  {"malloc", (uintptr_t)&malloc_bridge},
   {"mbrtowc", (uintptr_t)&mbrtowc},
-  {"memalign", (uintptr_t)&memalign},
+  {"memalign", (uintptr_t)&memalign_bridge},
   {"memchr", (uintptr_t)&memchr},
   {"memcmp", (uintptr_t)&memcmp},
   {"memcpy", (uintptr_t)&memcpy},
@@ -1006,7 +1006,7 @@ const so_default_dynlib default_dynlib[] = {
   {"read", (uintptr_t)&read_bridge},
   {"readdir", (uintptr_t)&readdir_bridge},
   {"readlink", (uintptr_t)&readlink_bridge},
-  {"realloc", (uintptr_t)&realloc},
+  {"realloc", (uintptr_t)&realloc_bridge},
   {"recv", (uintptr_t)&net_unavailable_bridge},
   {"recvfrom", (uintptr_t)&net_unavailable_bridge},
   {"recvmsg", (uintptr_t)&net_unavailable_bridge},
@@ -1049,13 +1049,13 @@ const so_default_dynlib default_dynlib[] = {
   {"sinh", (uintptr_t)&sinh},
   {"slCreateEngine", (uintptr_t)&slCreateEngine_bridge},
   {"sleep", (uintptr_t)&sleep_bridge},
-  {"snprintf", (uintptr_t)&snprintf},
+  {"snprintf", (uintptr_t)&snprintf_bridge},
   {"socket", (uintptr_t)&net_unavailable_bridge},
-  {"sprintf", (uintptr_t)&sprintf},
+  {"sprintf", (uintptr_t)&sprintf_bridge},
   {"sqrt", (uintptr_t)&sqrt},
   {"sqrtf", (uintptr_t)&sqrtf},
   {"srand48", (uintptr_t)&srand48},
-  {"sscanf", (uintptr_t)&sscanf},
+  {"sscanf", (uintptr_t)&sscanf_bridge},
   {"stat", (uintptr_t)&stat_bridge},
   {"strcasecmp", (uintptr_t)&strcasecmp},
   {"strcasestr", (uintptr_t)&strcasestr},
@@ -1104,11 +1104,11 @@ const so_default_dynlib default_dynlib[] = {
   {"unsetenv", (uintptr_t)&unsetenv},
   {"usleep", (uintptr_t)&usleep_bridge},
   {"utime", (uintptr_t)&utime_bridge},
-  {"vasprintf", (uintptr_t)&vasprintf},
+  {"vasprintf", (uintptr_t)&vasprintf_bridge},
   {"vfprintf", (uintptr_t)&vfprintf_bridge},
   {"vprintf", (uintptr_t)&vprintf_bridge},
-  {"vsnprintf", (uintptr_t)&vsnprintf},
-  {"vsprintf", (uintptr_t)&vsprintf},
+  {"vsnprintf", (uintptr_t)&vsnprintf_bridge},
+  {"vsprintf", (uintptr_t)&vsprintf_bridge},
   {"waitpid", (uintptr_t)&fail_bridge},
   {"wcrtomb", (uintptr_t)&wcrtomb},
   {"wcscoll", (uintptr_t)&wcscoll},

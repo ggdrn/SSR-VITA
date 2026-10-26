@@ -55,6 +55,7 @@ add_executable(${PROJECT_NAME}
   src/bridges/input_bridge.c
   src/bridges/audio_bridge.c
   src/bridges/misc_bridge.c
+  src/bridges/format_bridge.c
   src/jni/jni.c
   src/jni/java_impl.c
   src/text_pad.c

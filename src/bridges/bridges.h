@@ -35,6 +35,11 @@ void input_poll(void);
 // audio_bridge.c
 void audio_init(void);
 
+// format_bridge.c
+// Rewrites C99 length modifiers (z, t, j) that newlib's printf/scanf lack.
+const char *fmt_c99(const char *fmt, char *buf, size_t size);
+void log_heap_usage(const char *when);
+
 // Errno conversion between newlib and bionic (Linux ARM numbering).
 int errno_to_bionic(int e);
 
