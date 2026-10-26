@@ -41,6 +41,9 @@ def load_modules(log_path):
     mods = []
     if log_path:
         for line in open(log_path, errors="replace"):
+            m = re.search(r"loader: main\(\) at 0x([0-9A-Fa-f]+)", line)
+            if m:
+                mods.append(("main()", int(m.group(1), 16) & ~1, int(m.group(1), 16) + 1))
             m = re.search(r"so: (\S+) loaded at 0x([0-9A-Fa-f]+)-0x([0-9A-Fa-f]+)", line)
             if m:
                 mods.append((m.group(1), int(m.group(2), 16), int(m.group(3), 16)))
@@ -49,11 +52,34 @@ def load_modules(log_path):
 
 def where(addr, mods):
     for name, lo, hi in mods:
-        if lo <= addr < hi:
+        if name != "main()" and lo <= addr < hi:
             return f"{name}+0x{addr - lo:X}"
     if 0x81000000 <= addr < 0x82000000:
+        # Runtime main() vs. its link address gives the eboot relocation delta.
+        main = next((lo for name, lo, _ in mods if name == "main()"), None)
+        if main is not None and LINK_MAIN is not None:
+            return f"eboot link 0x{addr - main + LINK_MAIN:08X} (nm build/srr_vita)"
         return "eboot (loader)"
     return "?"
+
+
+def link_main():
+    import os
+    import subprocess
+    elf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "srr_vita")
+    nm = os.path.join(os.environ.get("VITASDK", "/usr/local/vitasdk"), "bin", "arm-vita-eabi-nm")
+    try:
+        out = subprocess.run([nm, elf], capture_output=True, text=True).stdout
+    except OSError:
+        return None
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) == 3 and p[2] == "main":
+            return int(p[0], 16)
+    return None
+
+
+LINK_MAIN = link_main()
 
 
 def main():

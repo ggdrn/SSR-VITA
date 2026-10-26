@@ -235,7 +235,7 @@ extern void getuid_bridge(void);
 extern void getwc_bridge(void);
 extern void glActiveTexture(void);
 extern void glAttachShader(void);
-extern void glBindAttribLocation(void);
+extern void glBindAttribLocation_bridge(void);
 extern void glBindBuffer(void);
 extern void glBindFramebuffer(void);
 extern void glBindRenderbuffer(void);
@@ -259,7 +259,7 @@ extern void glCreateShader(void);
 extern void glCullFace(void);
 extern void glDeleteBuffers(void);
 extern void glDeleteFramebuffers(void);
-extern void glDeleteProgram(void);
+extern void glDeleteProgram_bridge(void);
 extern void glDeleteRenderbuffers(void);
 extern void glDeleteShader(void);
 extern void glDeleteTextures(void);
@@ -296,7 +296,7 @@ extern void glGetTexParameteriv_bridge(void);
 extern void glGetUniformLocation(void);
 extern void glGetVertexAttribPointerv(void);
 extern void glGetVertexAttribiv(void);
-extern void glLinkProgram(void);
+extern void glLinkProgram_bridge(void);
 extern void glPixelStorei(void);
 extern void glPolygonOffset_sfp(void);
 extern void glReadPixels(void);
@@ -804,7 +804,7 @@ const so_default_dynlib default_dynlib[] = {
   {"getwc", (uintptr_t)&getwc_bridge},
   {"glActiveTexture", (uintptr_t)&glActiveTexture},
   {"glAttachShader", (uintptr_t)&glAttachShader},
-  {"glBindAttribLocation", (uintptr_t)&glBindAttribLocation},
+  {"glBindAttribLocation", (uintptr_t)&glBindAttribLocation_bridge},
   {"glBindBuffer", (uintptr_t)&glBindBuffer},
   {"glBindFramebuffer", (uintptr_t)&glBindFramebuffer},
   {"glBindRenderbuffer", (uintptr_t)&glBindRenderbuffer},
@@ -828,7 +828,7 @@ const so_default_dynlib default_dynlib[] = {
   {"glCullFace", (uintptr_t)&glCullFace},
   {"glDeleteBuffers", (uintptr_t)&glDeleteBuffers},
   {"glDeleteFramebuffers", (uintptr_t)&glDeleteFramebuffers},
-  {"glDeleteProgram", (uintptr_t)&glDeleteProgram},
+  {"glDeleteProgram", (uintptr_t)&glDeleteProgram_bridge},
   {"glDeleteRenderbuffers", (uintptr_t)&glDeleteRenderbuffers},
   {"glDeleteShader", (uintptr_t)&glDeleteShader},
   {"glDeleteTextures", (uintptr_t)&glDeleteTextures},
@@ -865,7 +865,7 @@ const so_default_dynlib default_dynlib[] = {
   {"glGetUniformLocation", (uintptr_t)&glGetUniformLocation},
   {"glGetVertexAttribPointerv", (uintptr_t)&glGetVertexAttribPointerv},
   {"glGetVertexAttribiv", (uintptr_t)&glGetVertexAttribiv},
-  {"glLinkProgram", (uintptr_t)&glLinkProgram},
+  {"glLinkProgram", (uintptr_t)&glLinkProgram_bridge},
   {"glPixelStorei", (uintptr_t)&glPixelStorei},
   {"glPolygonOffset", (uintptr_t)&glPolygonOffset_sfp},
   {"glReadPixels", (uintptr_t)&glReadPixels},

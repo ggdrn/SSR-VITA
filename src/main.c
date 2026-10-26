@@ -116,6 +116,9 @@ static void load_libraries(void) {
 int main(void) {
   log_init();
   L_INFO("SRR Vita " SRR_VERSION_STRING " (build %s)", __DATE__ " " __TIME__);
+  // The eboot is relocated at load time; this lets crash addresses be mapped
+  // back to `nm build/srr_vita` (see scripts/parse_core.py).
+  L_INFO("loader: main() at %p", (void *)main);
 
   scePowerSetArmClockFrequency(444);
   scePowerSetBusClockFrequency(222);

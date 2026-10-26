@@ -6,6 +6,7 @@
 #include "../config.h"
 #include "../util/log.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <vitaGL.h>
 
@@ -168,6 +169,56 @@ void glGetTexParameteriv_bridge(GLenum target, GLenum pname, GLint *params) {
   case GL_TEXTURE_WRAP_T: *params = GL_REPEAT; break;
   default: *params = 0; break;
   }
+}
+
+// GLES lets attribute locations be bound before shaders are attached; they
+// take effect at link time. vitaGL dereferences the attached vertex shader
+// immediately, so bindings are recorded here and replayed in glLinkProgram.
+
+typedef struct attrib_binding {
+  GLuint prog;
+  GLuint index;
+  char *name;
+  struct attrib_binding *next;
+} attrib_binding;
+
+static attrib_binding *bindings;
+
+void glBindAttribLocation_bridge(GLuint prog, GLuint index, const GLchar *name) {
+  for (attrib_binding *b = bindings; b; b = b->next) {
+    if (b->prog == prog && strcmp(b->name, name) == 0) {
+      b->index = index;
+      return;
+    }
+  }
+  attrib_binding *b = malloc(sizeof(*b));
+  b->prog = prog;
+  b->index = index;
+  b->name = strdup(name);
+  b->next = bindings;
+  bindings = b;
+}
+
+void glLinkProgram_bridge(GLuint prog) {
+  for (attrib_binding *b = bindings; b; b = b->next) {
+    if (b->prog == prog)
+      glBindAttribLocation(prog, b->index, b->name);
+  }
+  glLinkProgram(prog);
+}
+
+void glDeleteProgram_bridge(GLuint prog) {
+  for (attrib_binding **pb = &bindings; *pb;) {
+    attrib_binding *b = *pb;
+    if (b->prog == prog) {
+      *pb = b->next;
+      free(b->name);
+      free(b);
+    } else {
+      pb = &b->next;
+    }
+  }
+  glDeleteProgram(prog);
 }
 
 void gl_bridge_init(void) {

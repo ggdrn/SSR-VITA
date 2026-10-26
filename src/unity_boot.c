@@ -13,11 +13,13 @@
 #include "util/log.h"
 
 #include <string.h>
+#include <psp2/kernel/threadmgr.h>
 
 #define UNITY_PLAYER "com/unity3d/player/UnityPlayer"
 #define NATIVE_LOADER "com/unity3d/player/NativeLoader"
 
 void audio_fmod_start(void);
+void audio_fmod_stop(void);
 
 static void *env;
 static jobj *player;
@@ -121,5 +123,8 @@ int unity_run(void) {
       L_INFO("unity: frame %u", frame);
   }
   call_void("nativeDone");
+  // Let the audio thread leave its wait loop before the process goes away.
+  audio_fmod_stop();
+  sceKernelDelayThread(50 * 1000);
   return 0;
 }
