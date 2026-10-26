@@ -556,8 +556,18 @@ time_t time_bridge(time_t *t) {
   return ts.tv_sec;
 }
 
+// Sleeps in slices so queued signals still get handled (see signal_bridge.c).
+static void sleep_us(uint64_t us) {
+  do {
+    uint64_t slice = us > 5000 ? 5000 : us;
+    sceKernelDelayThreadCB(slice);
+    us -= slice;
+    signal_poll();
+  } while (us > 0);
+}
+
 int nanosleep_bridge(const struct timespec *req, struct timespec *rem) {
-  sceKernelDelayThreadCB(req->tv_sec * 1000000 + req->tv_nsec / 1000);
+  sleep_us((uint64_t)req->tv_sec * 1000000 + req->tv_nsec / 1000);
   if (rem)
     rem->tv_sec = rem->tv_nsec = 0;
   return 0;
@@ -568,12 +578,12 @@ int clock_nanosleep_bridge(int clk, int flags, const struct timespec *req, struc
 }
 
 int usleep_bridge(unsigned int us) {
-  sceKernelDelayThreadCB(us);
+  sleep_us(us);
   return 0;
 }
 
 unsigned int sleep_bridge(unsigned int s) {
-  sceKernelDelayThreadCB(s * 1000000);
+  sleep_us((uint64_t)s * 1000000);
   return 0;
 }
 

@@ -89,7 +89,35 @@ int pthread_mutex_destroy_bridge(uint32_t *bm) {
   return 0;
 }
 
-int pthread_mutex_lock_bridge(uint32_t *bm) { return pthread_mutex_lock(mutex_get(bm)); }
+// Blocking waits run in short slices so a thread parked here still answers
+// signals queued by pthread_kill() (see signal_bridge.c). Without this, Mono's
+// GC waits forever for threads blocked on its allocation lock.
+#define SLICE_NS (5 * 1000 * 1000)
+
+static void deadline_after(struct timespec *ts, int64_t ns) {
+  clock_gettime(CLOCK_REALTIME, ts);
+  ns += ts->tv_nsec;
+  ts->tv_sec += ns / 1000000000LL;
+  ts->tv_nsec = ns % 1000000000LL;
+}
+
+static int ts_before(const struct timespec *a, const struct timespec *b) {
+  return a->tv_sec < b->tv_sec || (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec);
+}
+
+int pthread_mutex_lock_bridge(uint32_t *bm) {
+  pthread_mutex_t *m = mutex_get(bm);
+  if (pthread_mutex_trylock(m) == 0)
+    return 0;
+  for (;;) {
+    signal_poll();
+    struct timespec ts;
+    deadline_after(&ts, SLICE_NS);
+    int r = pthread_mutex_timedlock(m, &ts);
+    if (r != ETIMEDOUT)
+      return r;
+  }
+}
 int pthread_mutex_unlock_bridge(uint32_t *bm) { return pthread_mutex_unlock(mutex_get(bm)); }
 int pthread_mutex_trylock_bridge(uint32_t *bm) {
   return pthread_mutex_trylock(mutex_get(bm)) == 0 ? 0 : B_EBUSY;
@@ -130,9 +158,38 @@ int pthread_cond_destroy_bridge(uint32_t *bc) {
   return 0;
 }
 
-int pthread_cond_wait_bridge(uint32_t *bc, uint32_t *bm) {
-  return pthread_cond_wait(cond_get(bc), mutex_get(bm));
+// Waits in slices until signalled or `target` (CLOCK_REALTIME, NULL = never).
+// A queued signal is handled with the mutex released and reported as a
+// spurious wakeup, which callers must already tolerate.
+static int cond_wait_until(uint32_t *bc, uint32_t *bm, const struct timespec *target) {
+  pthread_cond_t *c = cond_get(bc);
+  pthread_mutex_t *m = mutex_get(bm);
+  for (;;) {
+    struct timespec slice;
+    deadline_after(&slice, SLICE_NS);
+    if (target && ts_before(target, &slice))
+      slice = *target;
+    int r = pthread_cond_timedwait(c, m, &slice);
+    if (r == 0)
+      return 0;
+    if (r != ETIMEDOUT)
+      return r;
+    if (signal_pending_self()) {
+      pthread_mutex_unlock(m);
+      signal_poll();
+      pthread_mutex_lock(m);
+      return 0;
+    }
+    if (target) {
+      struct timespec now;
+      clock_gettime(CLOCK_REALTIME, &now);
+      if (!ts_before(&now, target))
+        return B_ETIMEDOUT;
+    }
+  }
 }
+
+int pthread_cond_wait_bridge(uint32_t *bc, uint32_t *bm) { return cond_wait_until(bc, bm, NULL); }
 int pthread_cond_signal_bridge(uint32_t *bc) { return pthread_cond_signal(cond_get(bc)); }
 int pthread_cond_broadcast_bridge(uint32_t *bc) { return pthread_cond_broadcast(cond_get(bc)); }
 
@@ -147,8 +204,7 @@ static int cond_timedwait(uint32_t *bc, uint32_t *bm, const struct timespec *abs
   int64_t ns = target.tv_nsec + rel_ns;
   target.tv_sec += ns / 1000000000LL;
   target.tv_nsec = ns % 1000000000LL;
-  int r = pthread_cond_timedwait(cond_get(bc), mutex_get(bm), &target);
-  return r == ETIMEDOUT ? B_ETIMEDOUT : r;
+  return cond_wait_until(bc, bm, &target);
 }
 
 int pthread_cond_timedwait_bridge(uint32_t *bc, uint32_t *bm, const struct timespec *t) {
@@ -301,6 +357,7 @@ int pthread_setschedparam_bridge(pthread_t t, int policy, const int *param) { re
 int sched_get_priority_min_bridge(int policy) { return 0; }
 int sched_get_priority_max_bridge(int policy) { return 0; }
 int sched_yield_bridge(void) {
+  signal_poll();
   sceKernelDelayThread(0);
   return 0;
 }
@@ -370,7 +427,14 @@ int sem_destroy_bridge(uint32_t *sem) {
 }
 
 int sem_wait_bridge(uint32_t *sem) {
-  int r = sceKernelWaitSemaCB(*sem, 1, NULL);
+  int r;
+  for (;;) {
+    SceUInt timeout = SLICE_NS / 1000;
+    r = sceKernelWaitSemaCB(*sem, 1, &timeout);
+    if (r != (int)SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+      break;
+    signal_poll();
+  }
   if (r < 0) {
     *__errno_bionic() = B_EINVAL;
     return -1;
@@ -390,8 +454,14 @@ int sem_timedwait_bridge(uint32_t *sem, const struct timespec *abstime) {
   struct timespec now;
   clock_gettime_bridge(0, &now);
   int64_t us = (int64_t)(abstime->tv_sec - now.tv_sec) * 1000000LL + (abstime->tv_nsec - now.tv_nsec) / 1000;
-  SceUInt timeout = us > 0 ? (SceUInt)us : 0;
-  int r = sceKernelWaitSemaCB(*sem, 1, &timeout);
+  int r;
+  do {
+    SceUInt slice = us > SLICE_NS / 1000 ? SLICE_NS / 1000 : (us > 0 ? (SceUInt)us : 0);
+    r = sceKernelWaitSemaCB(*sem, 1, &slice);
+    us -= SLICE_NS / 1000;
+    if (r == (int)SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+      signal_poll();
+  } while (r == (int)SCE_KERNEL_ERROR_WAIT_TIMEOUT && us > 0);
   if (r == (int)SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
     *__errno_bionic() = B_ETIMEDOUT;
     return -1;

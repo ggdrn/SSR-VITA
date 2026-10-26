@@ -14,6 +14,9 @@
 
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <pthread.h>
+
+int *__errno_bionic(void);
 
 #define B_SIGILL 4
 #define B_SIGBUS 7
@@ -107,13 +110,127 @@ int kill_bridge(int pid, int sig) {
   return raise_bridge(sig);
 }
 
+// --- cross-thread signals (cooperative delivery) ----------------------------
+// Boehm GC stops the world with pthread_kill(SIGPWR) and waits for each thread
+// to acknowledge from its signal handler, then resumes them with SIGXCPU while
+// they sit in sigsuspend(). The Vita can't interrupt another thread, so a
+// signal sent to another thread is queued and that thread runs the handler
+// the next time it passes through a blocking bridge (mutex, condition
+// variable, semaphore, sleep), which is where idle threads spend their time.
+
+typedef struct {
+  uint32_t thread;
+  volatile uint32_t pending;  // bit n = signal n (signals < 32)
+  uint64_t queued_at;         // when the oldest pending signal was queued (us)
+  int stale_warned;
+} sig_slot;
+
+#define MAX_SIG_THREADS 128
+static sig_slot sig_slots[MAX_SIG_THREADS];
+static volatile int total_pending;
+static SceKernelLwMutexWork sig_lock;
+
+static sig_slot *slot_for(uint32_t thread, int create) {
+  sig_slot *free_slot = NULL;
+  for (int i = 0; i < MAX_SIG_THREADS; i++) {
+    if (sig_slots[i].thread == thread)
+      return &sig_slots[i];
+    if (!sig_slots[i].thread && !free_slot)
+      free_slot = &sig_slots[i];
+  }
+  if (create && free_slot)
+    free_slot->thread = thread;
+  return create ? free_slot : NULL;
+}
+
+static uint32_t self_id(void) { return (uint32_t)pthread_self(); }
+
+static void deliver_now(int sig) {
+  bionic_siginfo info;
+  memset(&info, 0, sizeof(info));
+  info.si_signo = sig;
+  info.si_code = -6;  // SI_TKILL
+  bionic_ucontext uc;
+  memset(&uc, 0, sizeof(uc));
+  uc.uc_mcontext.sp = (uint32_t)__builtin_frame_address(0);
+  deliver(sig, &info, &uc);
+}
+
+// Runs this thread's pending signals that are not blocked by `mask`.
+// Reports threads that haven't picked up a queued signal for 3 s: they are
+// busy outside any bridge and will stall the GC.
+static void warn_stale(void) {
+  uint64_t now = sceKernelGetProcessTimeWide();
+  for (int i = 0; i < MAX_SIG_THREADS; i++) {
+    sig_slot *s = &sig_slots[i];
+    if (s->pending && !s->stale_warned && now - s->queued_at > 3000000) {
+      s->stale_warned = 1;
+      SceKernelThreadInfo info;
+      info.size = sizeof(info);
+      int ok = sceKernelGetThreadInfo(s->thread, &info) >= 0;
+      L_WARN("signals: thread %p (%s) hasn't handled signals 0x%X for 3 s; PC unknown, likely busy outside a wait",
+             (void *)s->thread, ok ? info.name : "?", s->pending);
+    }
+  }
+}
+
+static int deliver_pending(uint32_t mask) {
+  if (!total_pending)
+    return 0;
+  warn_stale();
+  sceKernelLockLwMutex(&sig_lock, 1, NULL);
+  sig_slot *slot = slot_for(self_id(), 0);
+  uint32_t todo = slot ? slot->pending & ~mask : 0;
+  if (todo) {
+    slot->pending &= ~todo;
+    total_pending -= __builtin_popcount(todo);
+  }
+  sceKernelUnlockLwMutex(&sig_lock, 1);
+  int n = 0;
+  for (int sig = 1; sig < 32; sig++) {
+    if (todo & (1u << sig)) {
+      deliver_now(sig);
+      n++;
+    }
+  }
+  return n;
+}
+
+int signal_pending_self(void) {
+  if (!total_pending)
+    return 0;
+  sceKernelLockLwMutex(&sig_lock, 1, NULL);
+  sig_slot *slot = slot_for(self_id(), 0);
+  int r = slot && slot->pending;
+  sceKernelUnlockLwMutex(&sig_lock, 1);
+  return r;
+}
+
+int signal_poll(void) { return deliver_pending(0); }
+
 int pthread_kill_bridge(uint32_t thread, int sig) {
   if (sig == 0)
     return 0;
-  static int warned;
-  if (warned++ < 8)
-    L_WARN("pthread_kill(%p, %d): cross-thread signals are not deliverable", (void *)thread, sig);
-  return 0;
+  if (thread == self_id()) {
+    deliver_now(sig);
+    return 0;
+  }
+  if (sig >= 32 || actions[sig].handler <= 1) {
+    L_WARN("pthread_kill(%p, %d): no handler, ignored", (void *)thread, sig);
+    return 0;
+  }
+  sceKernelLockLwMutex(&sig_lock, 1, NULL);
+  sig_slot *slot = slot_for(thread, 1);
+  if (slot && !(slot->pending & (1u << sig))) {
+    if (!slot->pending) {
+      slot->queued_at = sceKernelGetProcessTimeWide();
+      slot->stale_warned = 0;
+    }
+    slot->pending |= 1u << sig;
+    total_pending++;
+  }
+  sceKernelUnlockLwMutex(&sig_lock, 1);
+  return slot ? 0 : 11;  // EAGAIN when the table is full
 }
 
 int tkill_bridge(int tid, int sig) { return pthread_kill_bridge(tid, sig); }
@@ -124,8 +241,12 @@ int sigprocmask_bridge(int how, const uint32_t *set, uint32_t *old) {
   return 0;
 }
 
+// Waits until a signal outside `mask` has been handled (EINTR).
 int sigsuspend_bridge(const uint32_t *mask) {
-  L_WARN("sigsuspend() would block forever; returning");
+  uint32_t blocked = mask ? *mask : 0;
+  while (!deliver_pending(blocked))
+    sceKernelDelayThread(100);
+  *__errno_bionic() = 4;  // EINTR
   return -1;
 }
 
@@ -211,6 +332,7 @@ static void on_prefetch_abort(KuKernelExceptionContext *ctx) { handle_exception(
 static void on_undefined(KuKernelExceptionContext *ctx) { handle_exception(ctx, B_SIGILL, "Undefined instruction"); }
 
 void signal_init(void) {
+  sceKernelCreateLwMutex(&sig_lock, "signals", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
   KuKernelExceptionHandlerOpt opt = {.size = sizeof(opt)};
   int r = kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT, on_data_abort, NULL, &opt);
   kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT, on_prefetch_abort, NULL, &opt);

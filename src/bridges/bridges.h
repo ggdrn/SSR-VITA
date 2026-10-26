@@ -27,6 +27,10 @@ void mem_init(void);
 
 // signal_bridge.c
 void signal_init(void);
+// Runs signals queued for the calling thread by pthread_kill(); called from
+// every blocking bridge. Returns how many handlers ran.
+int signal_poll(void);
+int signal_pending_self(void);
 
 // input_bridge.c
 void input_init(void);
