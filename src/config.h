@@ -24,6 +24,8 @@
 
 // Memory budget (with ATTRIBUTE2=12 extended memory in param.sfo).
 #define NEWLIB_HEAP_SIZE (220 * 1024 * 1024)
-#define VGL_RAM_THRESHOLD (8 * 1024 * 1024)
+// RAM vitaGL leaves untouched for everything allocated after it: Mono JIT code
+// blocks (kubridge), thread stacks, audio ports.
+#define VGL_RAM_THRESHOLD (48 * 1024 * 1024)
 
 #endif

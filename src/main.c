@@ -18,6 +18,7 @@
 #include <psp2/apputil.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
 #include <psp2/vshbridge.h>
@@ -37,6 +38,14 @@ int unity_run(void);
 static const char *const libraries[] = {"libmono.so", "libmain.so", "libunity.so", "libcri_ware_unity.so"};
 #define NUM_LIBS (sizeof(libraries) / sizeof(libraries[0]))
 static so_module modules[NUM_LIBS];
+
+static void log_free_memory(const char *when) {
+  SceKernelFreeMemorySizeInfo info;
+  info.size = sizeof(info);
+  sceKernelGetFreeMemorySize(&info);
+  L_INFO("mem %s: user %d KB, cdram %d KB, phycont %d KB", when, info.size_user / 1024, info.size_cdram / 1024,
+         info.size_phycont / 1024);
+}
 
 static int file_exists(const char *path) {
   SceIoStat st;
@@ -133,9 +142,14 @@ int main(void) {
   input_init();
   audio_init();
   jni_init();
-  gl_bridge_init();
 
+  // Libraries first: vitaGL claims all free RAM above VGL_RAM_THRESHOLD, so
+  // the engine's code/data blocks must already be allocated by then.
+  log_free_memory("before libraries");
   load_libraries();
+  log_free_memory("after libraries");
+  gl_bridge_init();
+  log_free_memory("after vitaGL");
 
   int r = unity_run();
   L_INFO("game exited with %d", r);
