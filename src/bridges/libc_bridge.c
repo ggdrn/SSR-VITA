@@ -295,7 +295,10 @@ int ioctl_bridge(int fd, int req, ...) {
 }
 
 int close_bridge(int fd) { return RET_ERRNO(close(fd)); }
-ssize_t read_bridge(int fd, void *b, size_t n) { return RET_ERRNO(read(fd, b, n)); }
+ssize_t read_bridge(int fd, void *b, size_t n) {
+  signal_poll();
+  return RET_ERRNO(read(fd, b, n));
+}
 ssize_t write_bridge(int fd, const void *b, size_t n) {
   if (fd == 1 || fd == 2) {
     log_stream(b, n);
@@ -513,6 +516,7 @@ int closedir_bridge(bionic_DIR *bd) {
 #define B_CLOCK_MONOTONIC 1
 
 int clock_gettime_bridge(int clk, struct timespec *ts) {
+  signal_poll();  // busy loops poll the clock: a good place to take signals
   if (clk == B_CLOCK_REALTIME) {
     SceDateTime t;
     sceRtcGetCurrentClockUtc(&t);
@@ -669,6 +673,7 @@ void exit_bridge(int code) {
 }
 
 int fail_bridge(void) {
+  signal_poll();
   *__errno_bionic() = ENOSYS;
   return -1;
 }

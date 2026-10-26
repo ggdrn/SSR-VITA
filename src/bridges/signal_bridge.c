@@ -17,6 +17,7 @@
 #include <pthread.h>
 
 int *__errno_bionic(void);
+uintptr_t pthread_bridge_entry_of(uint32_t thread);
 
 #define B_SIGILL 4
 #define B_SIGBUS 7
@@ -168,8 +169,14 @@ static void warn_stale(void) {
       SceKernelThreadInfo info;
       info.size = sizeof(info);
       int ok = sceKernelGetThreadInfo(s->thread, &info) >= 0;
-      L_WARN("signals: thread %p (%s) hasn't handled signals 0x%X for 3 s; PC unknown, likely busy outside a wait",
-             (void *)s->thread, ok ? info.name : "?", s->pending);
+      uintptr_t entry = pthread_bridge_entry_of(s->thread);
+      so_module *m = so_module_at(entry);
+      // status 1/2 = running/ready (busy outside any bridge); 8 = blocked in
+      // a kernel wait the bridges don't cover (waitType/waitId say which).
+      L_WARN("signals: thread %p (%s) hasn't handled signals 0x%X for 3 s: status %u, waitType 0x%X, waitId 0x%X, "
+             "started at %s+0x%X",
+             (void *)s->thread, ok ? info.name : "?", s->pending, ok ? info.status : 0, ok ? info.waitType : 0,
+             ok ? info.waitId : 0, m ? m->name : "?", m ? entry - m->base : entry);
     }
   }
 }
@@ -214,6 +221,15 @@ int pthread_kill_bridge(uint32_t thread, int sig) {
   if (thread == self_id()) {
     deliver_now(sig);
     return 0;
+  }
+  // Boehm GC treats ESRCH as "thread already gone" and stops waiting for it;
+  // queueing a signal for a finished thread would hang the collection.
+  SceKernelThreadInfo info;
+  info.size = sizeof(info);
+  if (sceKernelGetThreadInfo(thread, &info) < 0 ||
+      (info.status & (SCE_THREAD_DORMANT | SCE_THREAD_KILLED | SCE_THREAD_DEAD))) {
+    L_DEBUG("pthread_kill(%p, %d): thread has exited", (void *)thread, sig);
+    return 3;  // ESRCH
   }
   if (sig >= 32 || actions[sig].handler <= 1) {
     L_WARN("pthread_kill(%p, %d): no handler, ignored", (void *)thread, sig);

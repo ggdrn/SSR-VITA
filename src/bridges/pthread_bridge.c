@@ -118,9 +118,16 @@ int pthread_mutex_lock_bridge(uint32_t *bm) {
       return r;
   }
 }
-int pthread_mutex_unlock_bridge(uint32_t *bm) { return pthread_mutex_unlock(mutex_get(bm)); }
+int pthread_mutex_unlock_bridge(uint32_t *bm) {
+  int r = pthread_mutex_unlock(mutex_get(bm));
+  signal_poll();
+  return r;
+}
 int pthread_mutex_trylock_bridge(uint32_t *bm) {
-  return pthread_mutex_trylock(mutex_get(bm)) == 0 ? 0 : B_EBUSY;
+  if (pthread_mutex_trylock(mutex_get(bm)) == 0)
+    return 0;
+  signal_poll();  // trylock spinners (Boehm's GC_lock) must still take signals
+  return B_EBUSY;
 }
 
 // --- condition variables ----------------------------------------------------
@@ -190,8 +197,14 @@ static int cond_wait_until(uint32_t *bc, uint32_t *bm, const struct timespec *ta
 }
 
 int pthread_cond_wait_bridge(uint32_t *bc, uint32_t *bm) { return cond_wait_until(bc, bm, NULL); }
-int pthread_cond_signal_bridge(uint32_t *bc) { return pthread_cond_signal(cond_get(bc)); }
-int pthread_cond_broadcast_bridge(uint32_t *bc) { return pthread_cond_broadcast(cond_get(bc)); }
+int pthread_cond_signal_bridge(uint32_t *bc) {
+  signal_poll();
+  return pthread_cond_signal(cond_get(bc));
+}
+int pthread_cond_broadcast_bridge(uint32_t *bc) {
+  signal_poll();
+  return pthread_cond_broadcast(cond_get(bc));
+}
 
 // Waits until `abstime` measured on bionic clock `clk`.
 static int cond_timedwait(uint32_t *bc, uint32_t *bm, const struct timespec *abstime, int clk) {
@@ -322,6 +335,12 @@ int pthread_create_bridge(pthread_t *out, const bionic_attr *battr, void *(*func
   return 0;
 }
 
+// Guest start routine of a thread created through pthread_create (for logs).
+uintptr_t pthread_bridge_entry_of(uint32_t thread) {
+  thread_slot *s = slot_find((pthread_t)thread);
+  return s ? (uintptr_t)s->func : 0;
+}
+
 int pthread_getattr_np_bridge(pthread_t t, bionic_attr *a) {
   memset(a, 0, sizeof(*a));
   SceUID uid = 0;
@@ -371,7 +390,10 @@ int pthread_key_create_bridge(uint32_t *key, void (*dtor)(void *)) {
   return r;
 }
 int pthread_key_delete_bridge(uint32_t key) { return pthread_key_delete((pthread_key_t)key); }
-void *pthread_getspecific_bridge(uint32_t key) { return pthread_getspecific((pthread_key_t)key); }
+void *pthread_getspecific_bridge(uint32_t key) {
+  signal_poll();
+  return pthread_getspecific((pthread_key_t)key);
+}
 int pthread_setspecific_bridge(uint32_t key, const void *v) { return pthread_setspecific((pthread_key_t)key, v); }
 
 static SceKernelLwMutexWork once_lock;
@@ -474,6 +496,7 @@ int sem_timedwait_bridge(uint32_t *sem, const struct timespec *abstime) {
 }
 
 int sem_post_bridge(uint32_t *sem) {
+  signal_poll();
   sceKernelSignalSema(*sem, 1);
   return 0;
 }

@@ -108,6 +108,7 @@ int gethostname_bridge(char *name, size_t len) {
 const char *gai_strerror_bridge(int code) { return "getaddrinfo not available"; }
 
 int net_unavailable_bridge(void) {
+  signal_poll();  // Mono's I/O threads retry these in loops
   static int warned;
   if (!warned++)
     L_WARN("network call before the socket bridge is implemented (from %p)", __builtin_return_address(0));
@@ -117,4 +118,7 @@ int net_unavailable_bridge(void) {
 
 // --- neutral stubs ----------------------------------------------------------
 
-int ret0_bridge(void) { return 0; }
+int ret0_bridge(void) {
+  signal_poll();
+  return 0;
+}
