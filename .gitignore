@@ -4,3 +4,5 @@ releases/
 *.vpk
 .DS_Store
 __pycache__/
+*.psp2dmp
+srr_log.txt

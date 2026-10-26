@@ -38,6 +38,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -O2 -g -mcpu=cortex-a9 -mfpu=neon -Wa
 add_executable(${PROJECT_NAME}
   src/main.c
   src/unity_boot.c
+  src/patches.c
   src/util/log.c
   src/util/apk.c
   src/loader/so_util.c

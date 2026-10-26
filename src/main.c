@@ -33,6 +33,7 @@ void libc_bridge_init(void);
 void pthread_bridge_init(void);
 void gl_bridge_init(void);
 int unity_run(void);
+void apply_patches(void);
 
 // Load order = initialisation order (dependencies first).
 static const char *const libraries[] = {"libmono.so", "libmain.so", "libunity.so", "libcri_ware_unity.so"};
@@ -105,6 +106,7 @@ static void load_libraries(void) {
     so_resolve(&modules[i], default_dynlib, default_dynlib_len);
     so_flush_caches(&modules[i]);
   }
+  apply_patches();
   for (size_t i = 0; i < NUM_LIBS; i++) {
     L_INFO("init %s", libraries[i]);
     so_initialize(&modules[i]);

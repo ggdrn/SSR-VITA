@@ -193,4 +193,6 @@ void signal_init(void) {
   kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION, on_undefined, NULL, &opt);
   if (r < 0)
     L_WARN("kubridge exception handlers unavailable (0x%08X): update kubridge.skprx", r);
+  else
+    L_INFO("signals: kubridge exception handlers registered");
 }
