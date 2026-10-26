@@ -646,8 +646,21 @@ static void *GetDirectBufferAddress(ENV, jobj *b) { return is_obj(b) && b->kind 
 static int64_t GetDirectBufferCapacity(ENV, jobj *b) { return is_obj(b) && b->kind == JO_BYTEBUFFER ? b->buf.cap : -1; }
 static int32_t GetObjectRefType(ENV, jobj *o) { return 2; }  // JNIGlobalRefType
 static jobj *DefineClass(ENV, const char *name, jobj *loader, const void *buf, int32_t len) { return NULL; }
-static void *FromReflected(ENV, jobj *o) { return NULL; }
-static jobj *ToReflected(ENV, jobj *c, void *id, uint8_t is_static) { return jni_new_object("java/lang/reflect/Method"); }
+// java.lang.reflect.Method/Field objects carry their jmethod/jfield in ->native.
+static void *FromReflected(ENV, jobj *o) { return is_obj(o) ? o->native : NULL; }
+static jobj *ToReflected(ENV, jobj *c, void *id, uint8_t is_static) {
+  jobj *o = jni_new_object("java/lang/reflect/Method");
+  o->native = id;
+  return o;
+}
+
+void *jni_method_id(const char *cls, const char *name, const char *sig) {
+  return get_method(jni_find_class(cls)->cls, name, sig);
+}
+
+void *jni_field_id(const char *cls, const char *name, const char *sig) {
+  return get_field(jni_find_class(cls)->cls, name, sig);
+}
 
 static void unimplemented_jni(void) { L_ERROR("jni: unimplemented JNIEnv slot called from %p", __builtin_return_address(0)); }
 

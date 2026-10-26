@@ -58,6 +58,9 @@ jobj *jni_new_string(const char *utf8);
 const char *jni_string_utf8(jobj *s);
 jobj *jni_find_class(const char *name);
 void *jni_new_direct_buffer(void *addr, int64_t capacity);
+// IDs as returned by GetMethodID/GetFieldID (used by emulated reflection).
+void *jni_method_id(const char *cls, const char *name, const char *sig);
+void *jni_field_id(const char *cls, const char *name, const char *sig);
 
 // Natives registered by the game through RegisterNatives.
 void *jni_find_native(const char *cls, const char *name);

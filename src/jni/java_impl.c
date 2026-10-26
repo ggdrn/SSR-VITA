@@ -374,6 +374,66 @@ static jvalue audio_getProperty(jobj *self, const jvalue *a) {
 static jvalue audio_getSampleRate(jobj *self, const jvalue *a) { return RET_INT(48000); }
 static jvalue audio_getFrameCount(jobj *self, const jvalue *a) { return RET_INT(1024); }
 
+// --- reflection / class loading ---------------------------------------------
+// Unity's AndroidJavaObject resolves members through ReflectionHelper and
+// then JNI FromReflectedMethod/Field; plugins are located with
+// ClassLoader.findLibrary before Mono's DllImport opens them.
+
+static jvalue reflection_getMethodID(jobj *self, const jvalue *a) {
+  jobj *cls = a[0].l;
+  jobj *m = jni_new_object("java/lang/reflect/Method");
+  m->native = jni_method_id(cls ? cls->cls : "java/lang/Object", jni_string_utf8(a[1].l), jni_string_utf8(a[2].l));
+  return RET_OBJ(m);
+}
+
+static jvalue reflection_getConstructorID(jobj *self, const jvalue *a) {
+  jobj *cls = a[0].l;
+  jobj *m = jni_new_object("java/lang/reflect/Constructor");
+  m->native = jni_method_id(cls ? cls->cls : "java/lang/Object", "<init>", jni_string_utf8(a[1].l));
+  return RET_OBJ(m);
+}
+
+static jvalue reflection_getFieldID(jobj *self, const jvalue *a) {
+  jobj *cls = a[0].l;
+  jobj *f = jni_new_object("java/lang/reflect/Field");
+  f->native = jni_field_id(cls ? cls->cls : "java/lang/Object", jni_string_utf8(a[1].l), jni_string_utf8(a[2].l));
+  return RET_OBJ(f);
+}
+
+static jvalue class_forName(jobj *self, const jvalue *a) {
+  char name[256];
+  strncpy(name, jni_string_utf8(a[0].l), sizeof(name) - 1);
+  name[sizeof(name) - 1] = 0;
+  for (char *p = name; *p; p++)
+    if (*p == '.')
+      *p = '/';
+  return RET_OBJ(jni_find_class(name));
+}
+
+static jvalue class_getName(jobj *self, const jvalue *a) {
+  char name[256];
+  strncpy(name, self ? self->cls : "java.lang.Object", sizeof(name) - 1);
+  name[sizeof(name) - 1] = 0;
+  for (char *p = name; *p; p++)
+    if (*p == '/')
+      *p = '.';
+  return RET_STR(name);
+}
+
+static jvalue object_getClass(jobj *self, const jvalue *a) {
+  return RET_OBJ(jni_find_class(self ? self->cls : "java/lang/Object"));
+}
+
+static jvalue classloader_findLibrary(jobj *self, const jvalue *a) {
+  char path[256];
+  snprintf(path, sizeof(path), ANDROID_APK_DIR "/lib/lib%s.so", jni_string_utf8(a[0].l));
+  return RET_STR(path);
+}
+
+static jvalue string_equals(jobj *self, const jvalue *a) {
+  return RET_BOOL(strcmp(jni_string_utf8(self), jni_string_utf8(a[0].l)) == 0);
+}
+
 static jvalue get_static_activity(jobj *self, const jvalue *a) {
   return RET_OBJ(jni_new_object("com/unity3d/player/UnityPlayerNativeActivity"));
 }
@@ -479,6 +539,17 @@ void java_impl_init(void) {
   jni_register_method(NULL, "startActivityIndicator", NULL, ret_void);
   jni_register_method(NULL, "stopActivityIndicator", NULL, ret_void);
   jni_register_method(NULL, "getCurrentActivity", NULL, get_static_activity);
+
+  // Reflection / class loading
+  jni_register_method(NULL, "getMethodID", NULL, reflection_getMethodID);
+  jni_register_method(NULL, "getConstructorID", NULL, reflection_getConstructorID);
+  jni_register_method(NULL, "getFieldID", NULL, reflection_getFieldID);
+  jni_register_method("java/lang/Class", "forName", NULL, class_forName);
+  jni_register_method("java/lang/Class", "getName", NULL, class_getName);
+  jni_register_method(NULL, "getClass", "()Ljava/lang/Class;", object_getClass);
+  jni_register_method(NULL, "findLibrary", NULL, classloader_findLibrary);
+  jni_register_method("java/lang/System", "load", NULL, ret_void);
+  jni_register_method("java/lang/String", "equals", NULL, string_equals);
 
   // Audio
   jni_register_method("org/fmod/FMODAudioDevice", "start", NULL, fmod_start);

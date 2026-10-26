@@ -314,6 +314,8 @@ static void handle_exception(KuKernelExceptionContext *ctx, int sig, const char 
   }
 
   if (!actions[sig].handler || actions[sig].handler == 1 || repeats >= 3) {
+    L_ERROR("signals: fatal %s (%s)", what,
+            repeats >= 3 ? "the guest handler resumed at the same fault 3 times" : "no guest handler installed");
     log_crash(ctx, what);
     // Exiting from inside the exception handler doesn't stop the process;
     // resume the faulting thread in fatal_exit() instead.
@@ -344,7 +346,21 @@ static void handle_exception(KuKernelExceptionContext *ctx, int sig, const char 
   uc.uc_mcontext.fault_address = ctx->FAR;
   memcpy(uc.uc_regspace, ctx->vfpRegisters, sizeof(ctx->vfpRegisters));
 
+  static int traced;
+  int trace = traced++ < 40;
+  uint32_t fault_pc = ctx->pc;
+
   deliver(sig, &info, &uc);
+
+  if (trace) {
+    so_module *m = so_module_at(fault_pc);
+    so_module *hm = so_module_at(actions[sig].handler);
+    so_module *rm = so_module_at(uc.uc_mcontext.pc);
+    L_INFO("signals: %s sig %d at pc %08X (%s+0x%X) far %08X -> handler %s+0x%X -> resume pc %08X (%s+0x%X) sp %08X",
+           what, sig, fault_pc, m ? m->name : "?", m ? fault_pc - m->base : 0, ctx->FAR, hm ? hm->name : "?",
+           hm ? actions[sig].handler - hm->base : 0, uc.uc_mcontext.pc, rm ? rm->name : "?",
+           rm ? uc.uc_mcontext.pc - rm->base : 0, uc.uc_mcontext.sp);
+  }
 
   for (int i = 0; i < 11; i++)
     regs[i] = uc.uc_mcontext.r[i];
