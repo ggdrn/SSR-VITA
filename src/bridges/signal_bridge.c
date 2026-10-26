@@ -143,6 +143,13 @@ static void log_crash(KuKernelExceptionContext *ctx, const char *what) {
           ctx->r12, ctx->sp, ctx->SPSR);
 }
 
+static void fatal_exit(void) {
+  L_ERROR("exiting after unrecoverable fault");
+  sceKernelExitProcess(0);
+  for (;;)
+    sceKernelDelayThread(1000000);
+}
+
 static void handle_exception(KuKernelExceptionContext *ctx, int sig, const char *what) {
   // A guest handler that returns without fixing the fault (Unity's crash
   // reporter chains back to the default action) would re-fault forever.
@@ -158,7 +165,12 @@ static void handle_exception(KuKernelExceptionContext *ctx, int sig, const char 
 
   if (!actions[sig].handler || actions[sig].handler == 1 || repeats >= 3) {
     log_crash(ctx, what);
-    sceKernelExitProcess(0);
+    // Exiting from inside the exception handler doesn't stop the process;
+    // resume the faulting thread in fatal_exit() instead.
+    uintptr_t target = (uintptr_t)fatal_exit;
+    ctx->pc = target & ~1;
+    ctx->SPSR = (target & 1) ? (ctx->SPSR | 0x20) : (ctx->SPSR & ~0x20);
+    ctx->SPSR &= ~0x0600FC00;  // clear Thumb IT state bits
     return;
   }
 

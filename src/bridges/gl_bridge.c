@@ -241,11 +241,79 @@ void glBindAttribLocation_bridge(GLuint prog, GLuint index, const GLchar *name) 
   bindings = b;
 }
 
+// --- uniform locations ------------------------------------------------------
+// vitaGL returns -(pointer to its uniform record) as the location: a huge
+// positive int. Unity sizes per-shader tables by the largest location
+// ((max + 1) * 16 bytes -> a 3.6 GB allocation), so locations are remapped to
+// small per-program indices and translated back in glUniform*.
+
+#define MAX_PROGRAMS 1025  // vitaGL's MAX_CUSTOM_PROGRAMS + 1 (names start at 1)
+
+typedef struct {
+  GLint *real;
+  int count, cap;
+} location_table;
+
+static location_table locations[MAX_PROGRAMS];
+static GLuint current_program;
+
+static void locations_clear(GLuint prog) {
+  if (prog < MAX_PROGRAMS) {
+    free(locations[prog].real);
+    memset(&locations[prog], 0, sizeof(location_table));
+  }
+}
+
+GLint glGetUniformLocation_bridge(GLuint prog, const GLchar *name) {
+  GLint real = glGetUniformLocation(prog, name);
+  if (real == -1 || prog >= MAX_PROGRAMS)
+    return -1;
+  location_table *t = &locations[prog];
+  for (int i = 0; i < t->count; i++) {
+    if (t->real[i] == real)
+      return i;
+  }
+  if (t->count == t->cap) {
+    t->cap = t->cap ? t->cap * 2 : 16;
+    t->real = realloc(t->real, t->cap * sizeof(GLint));
+  }
+  t->real[t->count] = real;
+  return t->count++;
+}
+
+static GLint real_location(GLint loc) {
+  if (loc < 0 || current_program >= MAX_PROGRAMS || loc >= locations[current_program].count)
+    return -1;
+  return locations[current_program].real[loc];
+}
+
+void glUseProgram_bridge(GLuint prog) {
+  current_program = prog;
+  glUseProgram(prog);
+}
+
+void glUniform1i_bridge(GLint loc, GLint v) { glUniform1i(real_location(loc), v); }
+void glUniform1iv_bridge(GLint loc, GLsizei n, const GLint *v) { glUniform1iv(real_location(loc), n, v); }
+void glUniform2iv_bridge(GLint loc, GLsizei n, const GLint *v) { glUniform2iv(real_location(loc), n, v); }
+void glUniform3iv_bridge(GLint loc, GLsizei n, const GLint *v) { glUniform3iv(real_location(loc), n, v); }
+void glUniform4iv_bridge(GLint loc, GLsizei n, const GLint *v) { glUniform4iv(real_location(loc), n, v); }
+void glUniform1fv_bridge(GLint loc, GLsizei n, const GLfloat *v) { glUniform1fv(real_location(loc), n, v); }
+void glUniform2fv_bridge(GLint loc, GLsizei n, const GLfloat *v) { glUniform2fv(real_location(loc), n, v); }
+void glUniform3fv_bridge(GLint loc, GLsizei n, const GLfloat *v) { glUniform3fv(real_location(loc), n, v); }
+void glUniform4fv_bridge(GLint loc, GLsizei n, const GLfloat *v) { glUniform4fv(real_location(loc), n, v); }
+void glUniformMatrix3fv_bridge(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) {
+  glUniformMatrix3fv(real_location(loc), n, t, v);
+}
+void glUniformMatrix4fv_bridge(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) {
+  glUniformMatrix4fv(real_location(loc), n, t, v);
+}
+
 void glLinkProgram_bridge(GLuint prog) {
   for (attrib_binding *b = bindings; b; b = b->next) {
     if (b->prog == prog)
       glBindAttribLocation(prog, b->index, b->name);
   }
+  locations_clear(prog);  // relinking invalidates every location
   glLinkProgram(prog);
 }
 
@@ -260,6 +328,7 @@ void glDeleteProgram_bridge(GLuint prog) {
       pb = &b->next;
     }
   }
+  locations_clear(prog);
   glDeleteProgram(prog);
 }
 

@@ -293,7 +293,7 @@ extern void glGetShaderInfoLog(void);
 extern void glGetShaderiv_bridge(void);
 extern void glGetString_bridge(void);
 extern void glGetTexParameteriv_bridge(void);
-extern void glGetUniformLocation(void);
+extern void glGetUniformLocation_bridge(void);
 extern void glGetVertexAttribPointerv(void);
 extern void glGetVertexAttribiv_bridge(void);
 extern void glLinkProgram_bridge(void);
@@ -312,18 +312,18 @@ extern void glTexImage2D(void);
 extern void glTexParameterf_sfp(void);
 extern void glTexParameteri(void);
 extern void glTexSubImage2D(void);
-extern void glUniform1fv(void);
-extern void glUniform1i(void);
-extern void glUniform1iv(void);
-extern void glUniform2fv(void);
-extern void glUniform2iv(void);
-extern void glUniform3fv(void);
-extern void glUniform3iv(void);
-extern void glUniform4fv(void);
-extern void glUniform4iv(void);
-extern void glUniformMatrix3fv(void);
-extern void glUniformMatrix4fv(void);
-extern void glUseProgram(void);
+extern void glUniform1fv_bridge(void);
+extern void glUniform1i_bridge(void);
+extern void glUniform1iv_bridge(void);
+extern void glUniform2fv_bridge(void);
+extern void glUniform2iv_bridge(void);
+extern void glUniform3fv_bridge(void);
+extern void glUniform3iv_bridge(void);
+extern void glUniform4fv_bridge(void);
+extern void glUniform4iv_bridge(void);
+extern void glUniformMatrix3fv_bridge(void);
+extern void glUniformMatrix4fv_bridge(void);
+extern void glUseProgram_bridge(void);
 extern void glVertexAttribPointer(void);
 extern void glViewport(void);
 extern void gmtime(void);
@@ -862,7 +862,7 @@ const so_default_dynlib default_dynlib[] = {
   {"glGetShaderiv", (uintptr_t)&glGetShaderiv_bridge},
   {"glGetString", (uintptr_t)&glGetString_bridge},
   {"glGetTexParameteriv", (uintptr_t)&glGetTexParameteriv_bridge},
-  {"glGetUniformLocation", (uintptr_t)&glGetUniformLocation},
+  {"glGetUniformLocation", (uintptr_t)&glGetUniformLocation_bridge},
   {"glGetVertexAttribPointerv", (uintptr_t)&glGetVertexAttribPointerv},
   {"glGetVertexAttribiv", (uintptr_t)&glGetVertexAttribiv_bridge},
   {"glLinkProgram", (uintptr_t)&glLinkProgram_bridge},
@@ -881,18 +881,18 @@ const so_default_dynlib default_dynlib[] = {
   {"glTexParameterf", (uintptr_t)&glTexParameterf_sfp},
   {"glTexParameteri", (uintptr_t)&glTexParameteri},
   {"glTexSubImage2D", (uintptr_t)&glTexSubImage2D},
-  {"glUniform1fv", (uintptr_t)&glUniform1fv},
-  {"glUniform1i", (uintptr_t)&glUniform1i},
-  {"glUniform1iv", (uintptr_t)&glUniform1iv},
-  {"glUniform2fv", (uintptr_t)&glUniform2fv},
-  {"glUniform2iv", (uintptr_t)&glUniform2iv},
-  {"glUniform3fv", (uintptr_t)&glUniform3fv},
-  {"glUniform3iv", (uintptr_t)&glUniform3iv},
-  {"glUniform4fv", (uintptr_t)&glUniform4fv},
-  {"glUniform4iv", (uintptr_t)&glUniform4iv},
-  {"glUniformMatrix3fv", (uintptr_t)&glUniformMatrix3fv},
-  {"glUniformMatrix4fv", (uintptr_t)&glUniformMatrix4fv},
-  {"glUseProgram", (uintptr_t)&glUseProgram},
+  {"glUniform1fv", (uintptr_t)&glUniform1fv_bridge},
+  {"glUniform1i", (uintptr_t)&glUniform1i_bridge},
+  {"glUniform1iv", (uintptr_t)&glUniform1iv_bridge},
+  {"glUniform2fv", (uintptr_t)&glUniform2fv_bridge},
+  {"glUniform2iv", (uintptr_t)&glUniform2iv_bridge},
+  {"glUniform3fv", (uintptr_t)&glUniform3fv_bridge},
+  {"glUniform3iv", (uintptr_t)&glUniform3iv_bridge},
+  {"glUniform4fv", (uintptr_t)&glUniform4fv_bridge},
+  {"glUniform4iv", (uintptr_t)&glUniform4iv_bridge},
+  {"glUniformMatrix3fv", (uintptr_t)&glUniformMatrix3fv_bridge},
+  {"glUniformMatrix4fv", (uintptr_t)&glUniformMatrix4fv_bridge},
+  {"glUseProgram", (uintptr_t)&glUseProgram_bridge},
   {"glVertexAttribPointer", (uintptr_t)&glVertexAttribPointer},
   {"glViewport", (uintptr_t)&glViewport},
   {"gmtime", (uintptr_t)&gmtime},
