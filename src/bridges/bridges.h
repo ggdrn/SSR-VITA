@@ -16,6 +16,12 @@ const char *fs_translate(const char *path, char *out, size_t out_size);
 void fs_init(const char *apk_ux0_path);
 const char *fs_apk_android_path(void);
 
+// proc_bridge.c
+// Generates the requested /proc file and returns its ux0 path, or NULL.
+const char *proc_translate(const char *path, char *out, size_t out_size);
+// Must run on the thread that later initialises Mono (its stack is "[stack]").
+void proc_init(void);
+
 // mem_bridge.c
 void mem_init(void);
 

@@ -62,6 +62,8 @@ void so_initialize(so_module *mod);
 
 uintptr_t so_symbol(so_module *mod, const char *name);
 so_module *so_find_module(const char *name);
+// Head of the loaded module list (linked through ->next).
+so_module *so_modules(void);
 // Searches every loaded module's exports.
 uintptr_t so_symbol_global(const char *name);
 // Returns the module containing `addr`, if any (used for crash logs).

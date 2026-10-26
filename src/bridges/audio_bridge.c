@@ -414,14 +414,21 @@ static int fmod_thread(SceSize args, void *argp) {
   }
   void *env = jni_get_env();
 
-  while (!fmod_quit && !getInfo(env, NULL, FMOD_INFO_MIXERRUNNING))
+  // getInfo returns -1 until Unity has created the FMOD system, which happens
+  // during the first frames of nativeRender.
+  int rate = -1, block = -1;
+  for (int waited = 0; !fmod_quit; waited++) {
+    rate = getInfo(env, NULL, FMOD_INFO_SAMPLERATE);
+    block = getInfo(env, NULL, FMOD_INFO_DSPBUFFERLENGTH);
+    if (rate > 0 && block > 0 && getInfo(env, NULL, FMOD_INFO_MIXERRUNNING) > 0)
+      break;
+    if (waited % 500 == 499)
+      L_INFO("fmod: still waiting for the mixer (rate %d, block %d)", rate, block);
     sceKernelDelayThread(10000);
-
-  int rate = getInfo(env, NULL, FMOD_INFO_SAMPLERATE);
-  int block = getInfo(env, NULL, FMOD_INFO_DSPBUFFERLENGTH);
+  }
+  if (fmod_quit)
+    return sceKernelExitDeleteThread(0);
   L_INFO("fmod: mixer running, %d Hz, block %d frames", rate, block);
-  if (block <= 0)
-    block = 1024;
   int grain = (block + 63) & ~63;
 
   int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, grain, vita_rate(rate), SCE_AUDIO_OUT_MODE_STEREO);
@@ -434,7 +441,7 @@ static int fmod_thread(SceSize args, void *argp) {
   void *bytebuf = jni_new_direct_buffer(pcm, block * 2 * sizeof(int16_t));
 
   while (!fmod_quit) {
-    if (getInfo(env, NULL, FMOD_INFO_MIXERRUNNING)) {
+    if (getInfo(env, NULL, FMOD_INFO_MIXERRUNNING) > 0) {
       process(env, NULL, bytebuf);
     } else {
       memset(pcm, 0, grain * 2 * sizeof(int16_t));

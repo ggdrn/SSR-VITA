@@ -379,6 +379,8 @@ uintptr_t so_symbol(so_module *mod, const char *name) {
   return 0;
 }
 
+so_module *so_modules(void) { return modules; }
+
 so_module *so_find_module(const char *name) {
   // Accept "libfoo.so", "foo", "/path/libfoo.so".
   const char *base = strrchr(name, '/');

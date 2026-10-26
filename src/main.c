@@ -135,6 +135,7 @@ int main(void) {
     fatal_error("Could not read %s.\nIs the APK complete?", apk);
 
   fs_init(apk);
+  proc_init();
   libc_bridge_init();
   pthread_bridge_init();
   mem_init();

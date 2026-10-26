@@ -48,6 +48,7 @@ add_executable(${PROJECT_NAME}
   src/bridges/mem_bridge.c
   src/bridges/signal_bridge.c
   src/bridges/fs_bridge.c
+  src/bridges/proc_bridge.c
   src/bridges/gl_bridge.c
   src/bridges/android_bridge.c
   src/bridges/input_bridge.c
@@ -55,7 +56,11 @@ add_executable(${PROJECT_NAME}
   src/bridges/misc_bridge.c
   src/jni/jni.c
   src/jni/java_impl.c
+  src/text_pad.c
 )
+
+set(SRR_TEXT_PAD 0 CACHE STRING "Bytes of padding in the text segment (see src/text_pad.c)")
+set_source_files_properties(src/text_pad.c PROPERTIES COMPILE_DEFINITIONS "SRR_TEXT_PAD=${SRR_TEXT_PAD}")
 
 # dynlib.c declares every import with a dummy prototype on purpose.
 set_source_files_properties(src/loader/dynlib.c PROPERTIES COMPILE_FLAGS
