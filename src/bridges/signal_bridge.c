@@ -270,8 +270,9 @@ int sigprocmask_bridge(int how, const uint32_t *set, uint32_t *old) {
 }
 
 // Waits until a signal outside `mask` has been handled (EINTR).
+// Linux sigset_t uses bit (n - 1) for signal n; pending sets use bit n.
 int sigsuspend_bridge(const uint32_t *mask) {
-  uint32_t blocked = mask ? *mask : 0;
+  uint32_t blocked = mask ? *mask << 1 : 0;
   while (!deliver_pending(blocked))
     sceKernelDelayThread(100);
   *__errno_bionic() = 4;  // EINTR
