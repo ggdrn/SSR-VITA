@@ -170,13 +170,18 @@ static void warn_stale(void) {
       info.size = sizeof(info);
       int ok = sceKernelGetThreadInfo(s->thread, &info) >= 0;
       uintptr_t entry = pthread_bridge_entry_of(s->thread);
+      SceKernelSemaInfo sema;
+      sema.size = sizeof(sema);
+      const char *wait_name = "?";
+      if (ok && (info.waitType & 0x20) && sceKernelGetSemaInfo(info.waitId, &sema) >= 0)
+        wait_name = sema.name;
       so_module *m = so_module_at(entry);
       // status 1/2 = running/ready (busy outside any bridge); 8 = blocked in
       // a kernel wait the bridges don't cover (waitType/waitId say which).
-      L_WARN("signals: thread %p (%s) hasn't handled signals 0x%X for 3 s: status %u, waitType 0x%X, waitId 0x%X, "
-             "started at %s+0x%X",
+      L_WARN("signals: thread %p (%s) hasn't handled signals 0x%X for 3 s: status %u, waitType 0x%X, waitId 0x%X "
+             "(%s), started at %s+0x%X",
              (void *)s->thread, ok ? info.name : "?", s->pending, ok ? info.status : 0, ok ? info.waitType : 0,
-             ok ? info.waitId : 0, m ? m->name : "?", m ? entry - m->base : entry);
+             ok ? info.waitId : 0, wait_name, m ? m->name : "?", m ? entry - m->base : entry);
     }
   }
 }

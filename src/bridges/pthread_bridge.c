@@ -251,9 +251,10 @@ typedef struct thread_slot {
 #define MAX_THREADS 128
 static thread_slot threads[MAX_THREADS];
 
+// Accepts either the pthread_t or the kernel thread UID.
 static thread_slot *slot_find(pthread_t t) {
   for (int i = 0; i < MAX_THREADS; i++) {
-    if (threads[i].thread == t && threads[i].uid)
+    if (threads[i].func && (threads[i].thread == t || (threads[i].uid && threads[i].uid == (SceUID)t)))
       return &threads[i];
   }
   return NULL;
@@ -332,6 +333,7 @@ int pthread_create_bridge(pthread_t *out, const bionic_attr *battr, void *(*func
     return r;
   }
   *out = s->thread;
+  L_DEBUG("pthread_create -> %p, entry %p", (void *)s->thread, func);
   return 0;
 }
 
@@ -362,7 +364,24 @@ int pthread_getattr_np_bridge(pthread_t t, bionic_attr *a) {
 }
 
 int pthread_detach_bridge(pthread_t t) { return pthread_detach(t); }
-int pthread_join_bridge(pthread_t t, void **ret) { return pthread_join(t, ret); }
+// Waits for the thread's end in slices (taking queued signals) before the
+// real join, which then returns immediately.
+int pthread_join_bridge(pthread_t t, void **ret) {
+  thread_slot *s = slot_find(t);
+  for (;;) {
+    SceUID uid = s ? s->uid : (SceUID)t;
+    if (uid) {
+      SceUInt timeout = SLICE_NS / 1000;
+      int r = sceKernelWaitThreadEnd(uid, NULL, &timeout);
+      if (r != (int)SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+        break;
+    } else {
+      sceKernelDelayThread(SLICE_NS / 1000);  // trampoline hasn't recorded the UID yet
+    }
+    signal_poll();
+  }
+  return pthread_join(t, ret);
+}
 void pthread_exit_bridge(void *ret) { pthread_exit(ret); }
 pthread_t pthread_self_bridge(void) { return pthread_self(); }
 int pthread_equal_bridge(pthread_t a, pthread_t b) { return a == b; }
