@@ -44,6 +44,13 @@ void audio_init(void);
 const char *fmt_c99(const char *fmt, char *buf, size_t size);
 void log_heap_usage(const char *when);
 
+// watchdog.c
+#define WAIT_BEGIN(where, obj) thread_wait_begin(where, obj, (uintptr_t)__builtin_return_address(0))
+void thread_wait_begin(const char *where, const void *obj, uintptr_t caller);
+void thread_wait_end(void);
+void watchdog_start(void);
+extern volatile unsigned watchdog_frames;
+
 // Errno conversion between newlib and bionic (Linux ARM numbering).
 int errno_to_bionic(int e);
 

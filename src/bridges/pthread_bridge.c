@@ -109,13 +109,16 @@ int pthread_mutex_lock_bridge(uint32_t *bm) {
   pthread_mutex_t *m = mutex_get(bm);
   if (pthread_mutex_trylock(m) == 0)
     return 0;
+  WAIT_BEGIN("mutex_lock", bm);
   for (;;) {
     signal_poll();
     struct timespec ts;
     deadline_after(&ts, SLICE_NS);
     int r = pthread_mutex_timedlock(m, &ts);
-    if (r != ETIMEDOUT)
+    if (r != ETIMEDOUT) {
+      thread_wait_end();
       return r;
+    }
   }
 }
 int pthread_mutex_unlock_bridge(uint32_t *bm) {
@@ -196,7 +199,12 @@ static int cond_wait_until(uint32_t *bc, uint32_t *bm, const struct timespec *ta
   }
 }
 
-int pthread_cond_wait_bridge(uint32_t *bc, uint32_t *bm) { return cond_wait_until(bc, bm, NULL); }
+int pthread_cond_wait_bridge(uint32_t *bc, uint32_t *bm) {
+  WAIT_BEGIN("cond_wait", bc);
+  int r = cond_wait_until(bc, bm, NULL);
+  thread_wait_end();
+  return r;
+}
 int pthread_cond_signal_bridge(uint32_t *bc) {
   signal_poll();
   return pthread_cond_signal(cond_get(bc));
@@ -221,7 +229,10 @@ static int cond_timedwait(uint32_t *bc, uint32_t *bm, const struct timespec *abs
 }
 
 int pthread_cond_timedwait_bridge(uint32_t *bc, uint32_t *bm, const struct timespec *t) {
-  return cond_timedwait(bc, bm, t, 0);
+  WAIT_BEGIN("cond_timedwait", bc);
+  int r = cond_timedwait(bc, bm, t, 0);
+  thread_wait_end();
+  return r;
 }
 int pthread_cond_timedwait_monotonic_np_bridge(uint32_t *bc, uint32_t *bm, const struct timespec *t) {
   return cond_timedwait(bc, bm, t, 1);
@@ -404,6 +415,7 @@ int pthread_detach_bridge(pthread_t t) { return pthread_detach(t); }
 // Waits for the thread's end in slices (taking queued signals) before the
 // real join, which then returns immediately.
 int pthread_join_bridge(pthread_t t, void **ret) {
+  WAIT_BEGIN("join", (void *)t);
   thread_slot *s = slot_find(t);
   for (;;) {
     SceUID uid = s ? s->uid : (SceUID)t;
@@ -417,6 +429,7 @@ int pthread_join_bridge(pthread_t t, void **ret) {
     }
     signal_poll();
   }
+  thread_wait_end();
   return pthread_join(t, ret);
 }
 void pthread_exit_bridge(void *ret) { pthread_exit(ret); }
@@ -508,6 +521,7 @@ int sem_destroy_bridge(uint32_t *sem) {
 }
 
 int sem_wait_bridge(uint32_t *sem) {
+  WAIT_BEGIN("sem_wait", sem);
   int r;
   for (;;) {
     SceUInt timeout = SLICE_NS / 1000;
@@ -516,6 +530,7 @@ int sem_wait_bridge(uint32_t *sem) {
       break;
     signal_poll();
   }
+  thread_wait_end();
   if (r < 0) {
     *__errno_bionic() = B_EINVAL;
     return -1;

@@ -159,6 +159,16 @@ static void deliver_now(int sig) {
 }
 
 // Runs this thread's pending signals that are not blocked by `mask`.
+static void warn_stale(void);
+
+void signal_watchdog_tick(void) {
+  if (total_pending) {
+    sceKernelLockLwMutex(&sig_lock, 1, NULL);
+    warn_stale();
+    sceKernelUnlockLwMutex(&sig_lock, 1);
+  }
+}
+
 // Reports threads that haven't picked up a queued signal for 3 s: they are
 // busy outside any bridge and will stall the GC.
 static void warn_stale(void) {
@@ -273,8 +283,10 @@ int sigprocmask_bridge(int how, const uint32_t *set, uint32_t *old) {
 // Linux sigset_t uses bit (n - 1) for signal n; pending sets use bit n.
 int sigsuspend_bridge(const uint32_t *mask) {
   uint32_t blocked = mask ? *mask << 1 : 0;
+  WAIT_BEGIN("sigsuspend", mask);
   while (!deliver_pending(blocked))
     sceKernelDelayThread(100);
+  thread_wait_end();
   *__errno_bionic() = 4;  // EINTR
   return -1;
 }

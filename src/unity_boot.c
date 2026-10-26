@@ -120,7 +120,8 @@ int unity_run(void) {
       L_INFO("unity: nativeRender returned false after %u frames", frame);
       break;
     }
-    if (++frame == 1 || frame % 600 == 0)
+    watchdog_frames = ++frame;
+    if (frame == 1 || frame % 600 == 0)
       L_INFO("unity: frame %u", frame);
   }
   call_void("nativeDone");

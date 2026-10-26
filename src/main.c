@@ -152,6 +152,7 @@ int main(void) {
   // Libraries first: vitaGL claims all free RAM above VGL_RAM_THRESHOLD, so
   // the engine's code/data blocks must already be allocated by then.
   log_free_memory("before libraries");
+  watchdog_start();
   load_libraries();
   log_free_memory("after libraries");
   gl_bridge_init();

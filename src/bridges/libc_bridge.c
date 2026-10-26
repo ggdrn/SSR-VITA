@@ -571,7 +571,9 @@ static void sleep_us(uint64_t us) {
 }
 
 int nanosleep_bridge(const struct timespec *req, struct timespec *rem) {
+  WAIT_BEGIN("nanosleep", req);
   sleep_us((uint64_t)req->tv_sec * 1000000 + req->tv_nsec / 1000);
+  thread_wait_end();
   if (rem)
     rem->tv_sec = rem->tv_nsec = 0;
   return 0;
@@ -582,7 +584,9 @@ int clock_nanosleep_bridge(int clk, int flags, const struct timespec *req, struc
 }
 
 int usleep_bridge(unsigned int us) {
+  WAIT_BEGIN("usleep", (void *)us);
   sleep_us(us);
+  thread_wait_end();
   return 0;
 }
 
