@@ -517,6 +517,11 @@ int closedir_bridge(bionic_DIR *bd) {
 
 int clock_gettime_bridge(int clk, struct timespec *ts) {
   signal_poll();  // busy loops poll the clock: a good place to take signals
+  static uint32_t clocks_seen;
+  if (clk >= 0 && clk < 32 && !(clocks_seen & (1u << clk))) {
+    clocks_seen |= 1u << clk;
+    L_INFO("time: clock_gettime(%d) first used from %p", clk, __builtin_return_address(0));
+  }
   if (clk == B_CLOCK_REALTIME) {
     SceDateTime t;
     sceRtcGetCurrentClockUtc(&t);

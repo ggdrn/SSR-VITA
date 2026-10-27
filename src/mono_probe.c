@@ -23,6 +23,7 @@ static struct {
   MonoObject *(*type_get_object)(MonoDomain *, MonoType *);
   MonoClass *(*object_get_class)(MonoObject *);
   const char *(*class_get_name)(MonoClass *);
+  MonoImage *(*get_corlib)(void);
 } api;
 
 static MonoImage *unity_image;
@@ -52,6 +53,7 @@ static int probe_init(void) {
   SYM(type_get_object, "mono_type_get_object");
   SYM(object_get_class, "mono_object_get_class");
   SYM(class_get_name, "mono_class_get_name");
+  SYM(get_corlib, "mono_get_corlib");
   unity_image = api.image_loaded("UnityEngine");
   if (!unity_image)
     unity_image = api.image_loaded("/vita/srr224.apk/assets/bin/Data/Managed/UnityEngine.dll");
@@ -73,6 +75,19 @@ static MonoObject *call(const char *cls, const char *method, void *self, void **
     return NULL;
   }
   return r;
+}
+
+static MonoObject *call_in(MonoImage *img, const char *ns, const char *cls, const char *method, void *self,
+                           void **args, int nargs) {
+  MonoClass *k = api.class_from_name(img, ns, cls);
+  MonoMethod *mm = k ? api.get_method(k, method, nargs) : NULL;
+  if (!mm) {
+    L_WARN("probe: %s.%s.%s not found", ns, cls, method);
+    return NULL;
+  }
+  MonoObject *exc = NULL;
+  MonoObject *r = api.invoke(mm, self, args, &exc);
+  return exc ? NULL : r;
 }
 
 // Boxed value types keep their value right after the MonoObject header.
@@ -114,9 +129,14 @@ static void dump_scene(void) {
     MonoObject *g = array_at(gos, i);
     char name[64];
     string_of(call("Object", "get_name", g, NULL, 0), name, sizeof(name));
-    L_INFO("probe:   go '%s' self %d hierarchy %d layer %d", name, as_bool(call("GameObject", "get_activeSelf", g, NULL, 0)),
+    MonoObject *t = call("GameObject", "get_transform", g, NULL, 0);
+    MonoObject *lp = t ? call("Transform", "get_localPosition", t, NULL, 0) : NULL;
+    MonoObject *wp = t ? call("Transform", "get_position", t, NULL, 0) : NULL;
+    L_INFO("probe:   go '%s' self %d hierarchy %d layer %d local (%.3g, %.3g, %.3g) world (%.3g, %.3g, %.3g)", name,
+           as_bool(call("GameObject", "get_activeSelf", g, NULL, 0)),
            as_bool(call("GameObject", "get_activeInHierarchy", g, NULL, 0)),
-           unbox_int(call("GameObject", "get_layer", g, NULL, 0)));
+           unbox_int(call("GameObject", "get_layer", g, NULL, 0)), boxed_f(lp, 0), boxed_f(lp, 1), boxed_f(lp, 2),
+           boxed_f(wp, 0), boxed_f(wp, 1), boxed_f(wp, 2));
   }
   MonoObject *rs = find_all("Renderer");
   n = array_length(rs);
@@ -137,6 +157,42 @@ static void dump_scene(void) {
            "(%.5f, %.5f, %.5f)",
            boxed_f(b, 0), boxed_f(b, 1), boxed_f(b, 2), boxed_f(b, 3), boxed_f(b, 4), boxed_f(b, 5), boxed_f(pos, 0),
            boxed_f(pos, 1), boxed_f(pos, 2), boxed_f(scl, 0), boxed_f(scl, 1), boxed_f(scl, 2));
+  }
+}
+
+static double unbox_double(MonoObject *o) { return o ? *(double *)((char *)o + 8) : -9999.0; }
+
+// Float math through Mono's icalls (-> the loader's soft-float libm shims) and
+// Unity's own float paths, against known answers.
+static void math_selftest(MonoObject *cam) {
+  MonoImage *corlib = api.get_corlib();
+  double d1 = 2.0, d2 = 10.0, d3 = 1.0;
+  void *a1[1] = {&d1}, *a2[2] = {&d1, &d2}, *a3[2] = {&d3, &d3};
+  L_INFO("probe: Math.Sqrt(2)=%.6f Math.Sin(2)=%.6f Math.Cos(2)=%.6f Math.Pow(2,10)=%.3f Math.Atan2(1,1)=%.6f "
+         "Math.Log(2)=%.6f Math.Exp(2)=%.6f",
+         unbox_double(call_in(corlib, "System", "Math", "Sqrt", NULL, a1, 1)),
+         unbox_double(call_in(corlib, "System", "Math", "Sin", NULL, a1, 1)),
+         unbox_double(call_in(corlib, "System", "Math", "Cos", NULL, a1, 1)),
+         unbox_double(call_in(corlib, "System", "Math", "Pow", NULL, a2, 2)),
+         unbox_double(call_in(corlib, "System", "Math", "Atan2", NULL, a3, 2)),
+         unbox_double(call_in(corlib, "System", "Math", "Log", NULL, a1, 1)),
+         unbox_double(call_in(corlib, "System", "Math", "Exp", NULL, a1, 1)));
+  float f1 = 1.7f, f2 = 2.0f;
+  void *b1[1] = {&f1}, *b2[1] = {&f2};
+  L_INFO("probe: Mathf.Floor(1.7)=%.3f Mathf.Round(1.7)=%.3f Mathf.Sqrt(2)=%.6f Mathf.Sin(2)=%.6f RoundToInt(1.7)=%d",
+         unbox_float(call("Mathf", "Floor", NULL, b1, 1)), unbox_float(call("Mathf", "Round", NULL, b1, 1)),
+         unbox_float(call("Mathf", "Sqrt", NULL, b2, 1)), unbox_float(call("Mathf", "Sin", NULL, b2, 1)),
+         unbox_int(call("Mathf", "RoundToInt", NULL, b1, 1)));
+  if (cam) {
+    float vp[3] = {0.5f, 0.5f, 0.0f}, sp[3] = {480.0f, 272.0f, 0.0f};
+    void *c1[1] = {vp}, *c2[1] = {sp};
+    MonoObject *w1 = call("Camera", "ViewportToWorldPoint", cam, c1, 1);
+    MonoObject *w2 = call("Camera", "ScreenToWorldPoint", cam, c2, 1);
+    MonoObject *rect = call("Camera", "get_rect", cam, NULL, 0);
+    L_INFO("probe: cam.ViewportToWorldPoint(.5,.5,0)=(%.3f, %.3f, %.3f) ScreenToWorldPoint(480,272,0)=(%.3f, %.3f, "
+           "%.3f) rect (%.3f, %.3f, %.3f, %.3f)",
+           boxed_f(w1, 0), boxed_f(w1, 1), boxed_f(w1, 2), boxed_f(w2, 0), boxed_f(w2, 1), boxed_f(w2, 2),
+           boxed_f(rect, 0), boxed_f(rect, 1), boxed_f(rect, 2), boxed_f(rect, 3));
   }
 }
 
@@ -163,6 +219,11 @@ void mono_probe(void) {
   L_INFO("probe: level '%s' loading %d timeScale %.2f gameObjects %d cameras %d screen %dx%d", level, loading,
          scale, objects, ncams, unbox_int(call("Screen", "get_width", NULL, NULL, 0)),
          unbox_int(call("Screen", "get_height", NULL, NULL, 0)));
+  // Tweens and NGUI's RealTime move the title UI from these clocks.
+  L_INFO("probe: Time.time %.3f deltaTime %.4f realtimeSinceStartup %.3f frameCount %d",
+         unbox_float(call("Time", "get_time", NULL, NULL, 0)), unbox_float(call("Time", "get_deltaTime", NULL, NULL, 0)),
+         unbox_float(call("Time", "get_realtimeSinceStartup", NULL, NULL, 0)),
+         unbox_int(call("Time", "get_frameCount", NULL, NULL, 0)));
   static int dumps;
   if (dumps < 2 && objects > 0) {  // once early, once after things settle
     static int calls;
@@ -171,6 +232,9 @@ void mono_probe(void) {
       dumps++;
     }
   }
+  static int tested;
+  if (!tested++)
+    math_selftest(ncams > 0 ? array_at(cams, 0) : NULL);
   for (int i = 0; i < ncams && i < 8; i++) {
     MonoObject *cam = array_at(cams, i);
     char name[64];
