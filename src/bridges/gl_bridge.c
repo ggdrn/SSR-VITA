@@ -259,13 +259,52 @@ void glShaderSource_bridge(GLuint shader, GLsizei count, const GLchar *const *st
   glShaderSource(shader, count, strings, lengths);
 }
 
+// --- deferred shader deletion ------------------------------------------------
+// GL only destroys a deleted shader once no program references it; Unity
+// relies on that (it deletes shaders early and shares them between programs).
+// The bundled vitaGL could free such a shader underneath a later
+// glLinkProgram (crash in sceGxmProgramGetParameterCount on stage load), so
+// deletion is deferred here until no program we know of uses the shader.
+
+static uint8_t shader_delete_pending[MAX_SHADERS];
+
+static int shader_in_use(GLuint shader) {
+  for (int p = 0; p < 1025; p++)
+    if (program_shaders[p][0] == shader || program_shaders[p][1] == shader)
+      return 1;
+  return 0;
+}
+
+static void release_if_unused(GLuint shader) {
+  if (shader && shader < MAX_SHADERS && shader_delete_pending[shader] && !shader_in_use(shader)) {
+    shader_delete_pending[shader] = 0;
+    free(shader_sources[shader]);
+    shader_sources[shader] = NULL;
+    glDeleteShader(shader);
+  }
+}
+
+void glDeleteShader_bridge(GLuint shader) {
+  if (!shader || shader >= MAX_SHADERS) {
+    glDeleteShader(shader);
+    return;
+  }
+  shader_delete_pending[shader] = 1;
+  release_if_unused(shader);
+}
+
 void glAttachShader_bridge(GLuint prog, GLuint shader) {
+  GLuint replaced = 0;
   if (prog < 1025) {
     GLint type = 0;
     glGetShaderiv(shader, GL_SHADER_TYPE, &type);
-    program_shaders[prog][type == GL_FRAGMENT_SHADER ? 1 : 0] = shader;
+    int slot = type == GL_FRAGMENT_SHADER ? 1 : 0;
+    replaced = program_shaders[prog][slot];
+    program_shaders[prog][slot] = shader;
   }
   glAttachShader(prog, shader);
+  if (replaced && replaced != shader)
+    release_if_unused(replaced);
 }
 
 static void log_source(const char *what, GLuint shader) {
@@ -483,6 +522,13 @@ void glUniformMatrix4fv_bridge(GLint loc, GLsizei n, GLboolean t, const GLfloat 
 }
 
 void glLinkProgram_bridge(GLuint prog) {
+  // vitaGL dereferences both shaders unconditionally; a program missing one
+  // would crash instead of simply failing to link.
+  if (prog < 1025 && (!program_shaders[prog][0] || !program_shaders[prog][1])) {
+    L_ERROR("gl: program %u linked without a %s shader; skipped", prog,
+            program_shaders[prog][0] ? "fragment" : "vertex");
+    return;
+  }
   for (attrib_binding *b = bindings; b; b = b->next) {
     if (b->prog == prog)
       glBindAttribLocation(prog, b->index, b->name);
@@ -504,7 +550,15 @@ void glDeleteProgram_bridge(GLuint prog) {
     }
   }
   locations_clear(prog);
+  GLuint vs = 0, fs = 0;
+  if (prog < 1025) {
+    vs = program_shaders[prog][0];
+    fs = program_shaders[prog][1];
+    program_shaders[prog][0] = program_shaders[prog][1] = 0;
+  }
   glDeleteProgram(prog);
+  release_if_unused(vs);
+  release_if_unused(fs);
 }
 
 void gl_bridge_init(void) {

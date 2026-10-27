@@ -258,7 +258,7 @@ extern void glDeleteBuffers(void);
 extern void glDeleteFramebuffers(void);
 extern void glDeleteProgram_bridge(void);
 extern void glDeleteRenderbuffers(void);
-extern void glDeleteShader(void);
+extern void glDeleteShader_bridge(void);
 extern void glDeleteTextures(void);
 extern void glDepthFunc(void);
 extern void glDepthMask(void);
@@ -827,7 +827,7 @@ const so_default_dynlib default_dynlib[] = {
   {"glDeleteFramebuffers", (uintptr_t)&glDeleteFramebuffers},
   {"glDeleteProgram", (uintptr_t)&glDeleteProgram_bridge},
   {"glDeleteRenderbuffers", (uintptr_t)&glDeleteRenderbuffers},
-  {"glDeleteShader", (uintptr_t)&glDeleteShader},
+  {"glDeleteShader", (uintptr_t)&glDeleteShader_bridge},
   {"glDeleteTextures", (uintptr_t)&glDeleteTextures},
   {"glDepthFunc", (uintptr_t)&glDepthFunc},
   {"glDepthMask", (uintptr_t)&glDepthMask},
