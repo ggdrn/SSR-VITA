@@ -331,8 +331,11 @@ static int player_thread(SceSize args, void *argp) {
       const int16_t *s = (const int16_t *)(buf + f * in_frame_bytes);
       int16_t cur[2] = {s[0], o->channels > 1 ? s[1] : s[0]};
       while (phase < 0x10000) {
-        out[out_frames * 2] = prev[0] + (((cur[0] - prev[0]) * (int32_t)phase) >> 16);
-        out[out_frames * 2 + 1] = prev[1] + (((cur[1] - prev[1]) * (int32_t)phase) >> 16);
+        // 15-bit weight: (cur - prev) spans up to 65535, so a 16-bit weight
+        // would overflow int32 and turn into noise.
+        int32_t w = phase >> 1;
+        out[out_frames * 2] = prev[0] + (((cur[0] - prev[0]) * w) >> 15);
+        out[out_frames * 2 + 1] = prev[1] + (((cur[1] - prev[1]) * w) >> 15);
         if (++out_frames == SL_GRAIN) {
           if (o->port >= 0)
             sceAudioOutOutput(o->port, out);

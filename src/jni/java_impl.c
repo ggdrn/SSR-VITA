@@ -475,6 +475,14 @@ static jvalue integer_parseInt(jobj *self, const jvalue *a) { return RET_INT(ato
 
 static jvalue locale_getDefault(jobj *self, const jvalue *a) { return RET_OBJ(jni_new_object("java/util/Locale")); }
 
+extern volatile int unity_resize_requested;
+
+// Java posts the resize to the UI thread; it runs between frames here.
+static jvalue unity_triggerResizeCall(jobj *self, const jvalue *a) {
+  unity_resize_requested = 1;
+  return RET_VOID;
+}
+
 static jvalue get_static_activity(jobj *self, const jvalue *a) {
   return RET_OBJ(jni_new_object("com/unity3d/player/UnityPlayerNativeActivity"));
 }
@@ -581,6 +589,7 @@ void java_impl_init(void) {
   jni_register_method(NULL, "showSoftInput", NULL, ret_void);
   jni_register_method(NULL, "hideSoftInput", NULL, ret_void);
   jni_register_method(NULL, "setScreenSize", NULL, ret_void);
+  jni_register_method(NULL, "triggerResizeCall", NULL, unity_triggerResizeCall);
   jni_register_method(NULL, "showVideoPlayer", NULL, ret_false);
   jni_register_method(NULL, "startActivityIndicator", NULL, ret_void);
   jni_register_method(NULL, "stopActivityIndicator", NULL, ret_void);

@@ -47,6 +47,18 @@ static void call_bool_arg(const char *name, int v) {
   }
 }
 
+volatile int unity_resize_requested;
+
+// The Java surface callback reports the window size; without it Unity renders
+// into a tiny default viewport (the grey square in the bottom-left corner).
+void unity_resize(void) {
+  void (*resize)(void *, jobj *, int, int, int, int) = native(UNITY_PLAYER, "nativeResize");
+  if (resize) {
+    L_INFO("unity: nativeResize(%d, %d)", SCREEN_W, SCREEN_H);
+    resize(env, player, SCREEN_W, SCREEN_H, SCREEN_W, SCREEN_H);
+  }
+}
+
 static int jni_onload(const char *lib) {
   so_module *m = so_find_module(lib);
   int (*onload)(void *, void *) = m ? (void *)so_symbol(m, "JNI_OnLoad") : NULL;
@@ -104,6 +116,7 @@ int unity_run(void) {
     else
       ((void (*)(void *, jobj *, jobj *))recreate)(env, player, surface);
   }
+  unity_resize();
   call_void("nativeResume");
   call_bool_arg("nativeFocusChanged", 1);
 
@@ -124,6 +137,10 @@ int unity_run(void) {
   unsigned frame = 0;
   for (;;) {
     input_poll();
+    if (unity_resize_requested) {
+      unity_resize_requested = 0;
+      unity_resize();
+    }
     if (!render(env, player)) {
       L_INFO("unity: nativeRender returned false after %u frames", frame);
       break;
