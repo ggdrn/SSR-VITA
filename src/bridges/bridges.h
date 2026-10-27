@@ -40,6 +40,14 @@ int signal_pending_self(void);
 void input_init(void);
 void input_poll(void);
 
+// ime_bridge.c: Vita IME dialog behind Unity's TouchScreenKeyboard.
+void ime_show(const char *text, int type, int multiline, int secure, const char *placeholder);
+void ime_hide(void);
+void ime_set_text(const char *text);
+int ime_running(void);
+// Once the dialog closes on its own, returns the text to hand to Unity.
+const char *ime_poll(void);
+
 // audio_bridge.c
 void audio_init(void);
 

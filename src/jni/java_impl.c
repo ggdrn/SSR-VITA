@@ -60,6 +60,21 @@ static jvalue ret_true(jobj *self, const jvalue *a) { return RET_BOOL(1); }
 static jvalue ret_false(jobj *self, const jvalue *a) { return RET_BOOL(0); }
 static jvalue ret_zero(jobj *self, const jvalue *a) { return RET_INT(0); }
 static jvalue ret_void(jobj *self, const jvalue *a) { return RET_VOID; }
+
+// showSoftInput(String text, int type, boolean correction, boolean multiline,
+//               boolean secure, boolean alert, String placeholder)
+static jvalue unity_showSoftInput(jobj *self, const jvalue *a) {
+  ime_show(jni_string_utf8(a[0].l), a[1].i, a[3].z, a[4].z, jni_string_utf8(a[6].l));
+  return RET_VOID;
+}
+static jvalue unity_hideSoftInput(jobj *self, const jvalue *a) {
+  ime_hide();
+  return RET_VOID;
+}
+static jvalue unity_setSoftInputStr(jobj *self, const jvalue *a) {
+  ime_set_text(jni_string_utf8(a[0].l));
+  return RET_VOID;
+}
 static jvalue ret_null(jobj *self, const jvalue *a) { return RET_OBJ(NULL); }
 
 // --- Display ----------------------------------------------------------------
@@ -725,8 +740,9 @@ void java_impl_init(void) {
   jni_register_method(NULL, "isDebugBuild", NULL, ret_false);
   jni_register_method(NULL, "isEmbedded", NULL, ret_false);
   jni_register_method(NULL, "executeGLThreadJobs", NULL, ret_void);
-  jni_register_method(NULL, "showSoftInput", NULL, ret_void);
-  jni_register_method(NULL, "hideSoftInput", NULL, ret_void);
+  jni_register_method(NULL, "showSoftInput", NULL, unity_showSoftInput);
+  jni_register_method(NULL, "hideSoftInput", NULL, unity_hideSoftInput);
+  jni_register_method(NULL, "setSoftInputStr", NULL, unity_setSoftInputStr);
   jni_register_method(NULL, "setScreenSize", NULL, ret_void);
   jni_register_method(NULL, "triggerResizeCall", NULL, unity_triggerResizeCall);
   jni_register_method(NULL, "showVideoPlayer", NULL, ret_false);

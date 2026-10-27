@@ -114,7 +114,7 @@ static void gl_frame_stats(void);
 
 int eglSwapBuffers_bridge(void *dpy, void *surf) {
   gl_frame_stats();
-  vglSwapBuffers(GL_FALSE);
+  vglSwapBuffers(ime_running());  // GL_TRUE lets a common dialog draw on top
   return egl_ok();
 }
 

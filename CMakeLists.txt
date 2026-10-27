@@ -69,6 +69,7 @@ add_executable(${PROJECT_NAME}
   src/bridges/misc_bridge.c
   src/bridges/format_bridge.c
   src/bridges/watchdog.c
+  src/bridges/ime_bridge.c
   src/jni/jni.c
   src/jni/java_impl.c
   src/text_pad.c

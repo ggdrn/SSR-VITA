@@ -145,8 +145,19 @@ int unity_run(void) {
   log_heap_usage("before render loop");
   L_INFO("unity: entering render loop");
   unsigned frame = 0;
+  void (*set_input_string)(void *, jobj *, jobj *) = native(UNITY_PLAYER, "nativeSetInputString");
+  void (*soft_input_closed)(void *, jobj *) = native(UNITY_PLAYER, "nativeSoftInputClosed");
   for (;;) {
-    input_poll();
+    // While the system keyboard is up it owns the touchscreen and buttons.
+    if (!ime_running())
+      input_poll();
+    const char *typed = ime_poll();
+    if (typed) {
+      if (set_input_string)
+        set_input_string(env, player, jni_new_string(typed));
+      if (soft_input_closed)
+        soft_input_closed(env, player);
+    }
     if (unity_resize_requested) {
       unity_resize_requested = 0;
       unity_surface_changed();
