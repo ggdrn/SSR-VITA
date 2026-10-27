@@ -92,6 +92,43 @@ static void string_of(MonoObject *s, char *out, size_t size) {
   api.mono_free(u);
 }
 
+static MonoObject *find_all(const char *cls) {
+  MonoClass *k = api.class_from_name(unity_image, "UnityEngine", cls);
+  void *type_arg[1] = {api.type_get_object(api.domain_get(), api.class_get_type(k))};
+  return call("Object", "FindObjectsOfType", NULL, type_arg, 1);
+}
+
+static int as_bool(MonoObject *o) { return o ? *(uint8_t *)((char *)o + 8) : -1; }
+
+// One-off listing of the scene: every GameObject (active flags, layer) and
+// every Renderer (enabled, visible, layer). Shows whether the title UI exists
+// but is inactive, or was never created.
+static void dump_scene(void) {
+  MonoObject *gos = find_all("GameObject");
+  int n = array_length(gos);
+  L_INFO("probe: scene objects (%d):", n);
+  for (int i = 0; i < n && i < 160; i++) {
+    MonoObject *g = array_at(gos, i);
+    char name[64];
+    string_of(call("Object", "get_name", g, NULL, 0), name, sizeof(name));
+    L_INFO("probe:   go '%s' self %d hierarchy %d layer %d", name, as_bool(call("GameObject", "get_activeSelf", g, NULL, 0)),
+           as_bool(call("GameObject", "get_activeInHierarchy", g, NULL, 0)),
+           unbox_int(call("GameObject", "get_layer", g, NULL, 0)));
+  }
+  MonoObject *rs = find_all("Renderer");
+  n = array_length(rs);
+  L_INFO("probe: renderers (%d):", n);
+  for (int i = 0; i < n && i < 80; i++) {
+    MonoObject *r = array_at(rs, i);
+    MonoObject *g = call("Component", "get_gameObject", r, NULL, 0);
+    char name[64];
+    string_of(g ? call("Object", "get_name", g, NULL, 0) : NULL, name, sizeof(name));
+    L_INFO("probe:   renderer %s on '%s' enabled %d visible %d layer %d",
+           api.class_get_name(api.object_get_class(r)), name, as_bool(call("Renderer", "get_enabled", r, NULL, 0)),
+           as_bool(call("Renderer", "get_isVisible", r, NULL, 0)), g ? unbox_int(call("GameObject", "get_layer", g, NULL, 0)) : -1);
+  }
+}
+
 void mono_probe(void) {
   if (probe_disabled)
     return;
@@ -114,6 +151,14 @@ void mono_probe(void) {
   int ncams = array_length(cams);
   L_INFO("probe: level '%s' loading %d timeScale %.2f gameObjects %d cameras %d", level, loading, scale, objects,
          ncams);
+  static int dumps;
+  if (dumps < 2 && objects > 0) {  // once early, once after things settle
+    static int calls;
+    if (calls++ == 0 || calls == 5) {
+      dump_scene();
+      dumps++;
+    }
+  }
   for (int i = 0; i < ncams && i < 8; i++) {
     MonoObject *cam = array_at(cams, i);
     char name[64];
