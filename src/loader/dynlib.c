@@ -231,7 +231,7 @@ extern void gettimeofday_bridge(void);
 extern void getuid_bridge(void);
 extern void getwc_bridge(void);
 extern void glActiveTexture(void);
-extern void glAttachShader(void);
+extern void glAttachShader_bridge(void);
 extern void glBindAttribLocation_bridge(void);
 extern void glBindBuffer(void);
 extern void glBindFramebuffer(void);
@@ -248,7 +248,7 @@ extern void glClearDepthf_sfp(void);
 extern void glClearStencil(void);
 extern void glColorMask(void);
 extern void glCompileShader(void);
-extern void glCompressedTexImage2D(void);
+extern void glCompressedTexImage2D_bridge(void);
 extern void glCompressedTexSubImage2D_bridge(void);
 extern void glCopyTexSubImage2D(void);
 extern void glCreateProgram(void);
@@ -264,8 +264,8 @@ extern void glDepthFunc(void);
 extern void glDepthMask(void);
 extern void glDisable(void);
 extern void glDisableVertexAttribArray(void);
-extern void glDrawArrays(void);
-extern void glDrawElements(void);
+extern void glDrawArrays_bridge(void);
+extern void glDrawElements_bridge(void);
 extern void glEnable(void);
 extern void glEnableVertexAttribArray(void);
 extern void glFinish(void);
@@ -299,13 +299,13 @@ extern void glPolygonOffset_sfp(void);
 extern void glReadPixels(void);
 extern void glRenderbufferStorage(void);
 extern void glScissor(void);
-extern void glShaderSource(void);
+extern void glShaderSource_bridge(void);
 extern void glStencilFunc(void);
 extern void glStencilFuncSeparate(void);
 extern void glStencilMask(void);
 extern void glStencilOp(void);
 extern void glStencilOpSeparate(void);
-extern void glTexImage2D(void);
+extern void glTexImage2D_bridge(void);
 extern void glTexParameterf_sfp(void);
 extern void glTexParameteri(void);
 extern void glTexSubImage2D(void);
@@ -800,7 +800,7 @@ const so_default_dynlib default_dynlib[] = {
   {"getuid", (uintptr_t)&getuid_bridge},
   {"getwc", (uintptr_t)&getwc_bridge},
   {"glActiveTexture", (uintptr_t)&glActiveTexture},
-  {"glAttachShader", (uintptr_t)&glAttachShader},
+  {"glAttachShader", (uintptr_t)&glAttachShader_bridge},
   {"glBindAttribLocation", (uintptr_t)&glBindAttribLocation_bridge},
   {"glBindBuffer", (uintptr_t)&glBindBuffer},
   {"glBindFramebuffer", (uintptr_t)&glBindFramebuffer},
@@ -817,7 +817,7 @@ const so_default_dynlib default_dynlib[] = {
   {"glClearStencil", (uintptr_t)&glClearStencil},
   {"glColorMask", (uintptr_t)&glColorMask},
   {"glCompileShader", (uintptr_t)&glCompileShader},
-  {"glCompressedTexImage2D", (uintptr_t)&glCompressedTexImage2D},
+  {"glCompressedTexImage2D", (uintptr_t)&glCompressedTexImage2D_bridge},
   {"glCompressedTexSubImage2D", (uintptr_t)&glCompressedTexSubImage2D_bridge},
   {"glCopyTexSubImage2D", (uintptr_t)&glCopyTexSubImage2D},
   {"glCreateProgram", (uintptr_t)&glCreateProgram},
@@ -833,8 +833,8 @@ const so_default_dynlib default_dynlib[] = {
   {"glDepthMask", (uintptr_t)&glDepthMask},
   {"glDisable", (uintptr_t)&glDisable},
   {"glDisableVertexAttribArray", (uintptr_t)&glDisableVertexAttribArray},
-  {"glDrawArrays", (uintptr_t)&glDrawArrays},
-  {"glDrawElements", (uintptr_t)&glDrawElements},
+  {"glDrawArrays", (uintptr_t)&glDrawArrays_bridge},
+  {"glDrawElements", (uintptr_t)&glDrawElements_bridge},
   {"glEnable", (uintptr_t)&glEnable},
   {"glEnableVertexAttribArray", (uintptr_t)&glEnableVertexAttribArray},
   {"glFinish", (uintptr_t)&glFinish},
@@ -868,13 +868,13 @@ const so_default_dynlib default_dynlib[] = {
   {"glReadPixels", (uintptr_t)&glReadPixels},
   {"glRenderbufferStorage", (uintptr_t)&glRenderbufferStorage},
   {"glScissor", (uintptr_t)&glScissor},
-  {"glShaderSource", (uintptr_t)&glShaderSource},
+  {"glShaderSource", (uintptr_t)&glShaderSource_bridge},
   {"glStencilFunc", (uintptr_t)&glStencilFunc},
   {"glStencilFuncSeparate", (uintptr_t)&glStencilFuncSeparate},
   {"glStencilMask", (uintptr_t)&glStencilMask},
   {"glStencilOp", (uintptr_t)&glStencilOp},
   {"glStencilOpSeparate", (uintptr_t)&glStencilOpSeparate},
-  {"glTexImage2D", (uintptr_t)&glTexImage2D},
+  {"glTexImage2D", (uintptr_t)&glTexImage2D_bridge},
   {"glTexParameterf", (uintptr_t)&glTexParameterf_sfp},
   {"glTexParameteri", (uintptr_t)&glTexParameteri},
   {"glTexSubImage2D", (uintptr_t)&glTexSubImage2D},

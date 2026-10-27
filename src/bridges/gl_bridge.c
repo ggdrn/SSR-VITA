@@ -6,6 +6,7 @@
 #include "../config.h"
 #include "../util/log.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <vitaGL.h>
@@ -41,22 +42,30 @@ uintptr_t dynlib_lookup(const char *name);
 
 static int egl_error = EGL_SUCCESS;
 
+// Like real EGL, every successful call resets the error state; otherwise
+// Unity reads the stale EGL_BAD_MATCH from the refused GLES3 context after a
+// later eglMakeCurrent and reports it as a failure.
+static int egl_ok(void) {
+  egl_error = EGL_SUCCESS;
+  return 1;
+}
+
 void *eglGetDisplay_bridge(void *native) { return FAKE_DISPLAY; }
 
 int eglInitialize_bridge(void *dpy, int *major, int *minor) {
   if (major) *major = 1;
   if (minor) *minor = 4;
-  return 1;
+  return egl_ok();
 }
 
-int eglTerminate_bridge(void *dpy) { return 1; }
+int eglTerminate_bridge(void *dpy) { return egl_ok(); }
 
 int eglChooseConfig_bridge(void *dpy, const int *attribs, void **configs, int size, int *num) {
   if (configs && size > 0)
     configs[0] = FAKE_CONFIG;
   if (num)
     *num = 1;
-  return 1;
+  return egl_ok();
 }
 
 int eglGetConfigAttrib_bridge(void *dpy, void *cfg, int attr, int *value) {
@@ -75,11 +84,14 @@ int eglGetConfigAttrib_bridge(void *dpy, void *cfg, int attr, int *value) {
   case EGL_CONFIG_CAVEAT: *value = EGL_NONE; break;
   default: *value = 0; break;
   }
-  return 1;
+  return egl_ok();
 }
 
-void *eglCreateWindowSurface_bridge(void *dpy, void *cfg, void *win, const int *attribs) { return FAKE_SURFACE; }
-int eglDestroySurface_bridge(void *dpy, void *surf) { return 1; }
+void *eglCreateWindowSurface_bridge(void *dpy, void *cfg, void *win, const int *attribs) {
+  egl_ok();
+  return FAKE_SURFACE;
+}
+int eglDestroySurface_bridge(void *dpy, void *surf) { return egl_ok(); }
 
 void *eglCreateContext_bridge(void *dpy, void *cfg, void *share, const int *attribs) {
   for (const int *a = attribs; a && *a != EGL_NONE; a += 2) {
@@ -89,25 +101,29 @@ void *eglCreateContext_bridge(void *dpy, void *cfg, void *share, const int *attr
       return NULL;
     }
   }
+  egl_ok();
   return FAKE_CONTEXT;
 }
 
-int eglDestroyContext_bridge(void *dpy, void *ctx) { return 1; }
-int eglMakeCurrent_bridge(void *dpy, void *draw, void *read, void *ctx) { return 1; }
+int eglDestroyContext_bridge(void *dpy, void *ctx) { return egl_ok(); }
+int eglMakeCurrent_bridge(void *dpy, void *draw, void *read, void *ctx) { return egl_ok(); }
+
+static void gl_frame_stats(void);
 
 int eglSwapBuffers_bridge(void *dpy, void *surf) {
+  gl_frame_stats();
   vglSwapBuffers(GL_FALSE);
-  return 1;
+  return egl_ok();
 }
 
 int eglQuerySurface_bridge(void *dpy, void *surf, int attr, int *value) {
   if (attr == EGL_WIDTH) *value = SCREEN_W;
   else if (attr == EGL_HEIGHT) *value = SCREEN_H;
   else *value = 0;
-  return 1;
+  return egl_ok();
 }
 
-int eglSwapInterval_bridge(void *dpy, int interval) { return 1; }
+int eglSwapInterval_bridge(void *dpy, int interval) { return egl_ok(); }
 
 int eglGetError_bridge(void) {
   int e = egl_error;
@@ -213,6 +229,124 @@ void glGetTexParameteriv_bridge(GLenum target, GLenum pname, GLint *params) {
   }
 }
 
+// --- diagnostics --------------------------------------------------------------
+// vitaGL fails quietly when a GLSL shader doesn't translate or a texture
+// format isn't supported, which leaves the screen at the clear colour. These
+// wrappers log shader link failures with their sources, every texture format
+// seen, GL errors and the number of draw calls per frame.
+
+#define MAX_SHADERS 2049  // vitaGL's MAX_CUSTOM_SHADERS + 1
+static char *shader_sources[MAX_SHADERS];
+static GLuint program_shaders[1025][2];
+static unsigned draws_this_frame, frames_seen;
+static int link_failures;
+
+void glShaderSource_bridge(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
+  if (shader < MAX_SHADERS) {
+    size_t total = 0;
+    for (int i = 0; i < count; i++)
+      total += lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+    free(shader_sources[shader]);
+    char *src = malloc(total + 1), *p = src;
+    for (int i = 0; i < count; i++) {
+      size_t n = lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+      memcpy(p, strings[i], n);
+      p += n;
+    }
+    *p = 0;
+    shader_sources[shader] = src;
+  }
+  glShaderSource(shader, count, strings, lengths);
+}
+
+void glAttachShader_bridge(GLuint prog, GLuint shader) {
+  if (prog < 1025) {
+    GLint type = 0;
+    glGetShaderiv(shader, GL_SHADER_TYPE, &type);
+    program_shaders[prog][type == GL_FRAGMENT_SHADER ? 1 : 0] = shader;
+  }
+  glAttachShader(prog, shader);
+}
+
+static void log_source(const char *what, GLuint shader) {
+  const char *src = shader < MAX_SHADERS ? shader_sources[shader] : NULL;
+  if (!src) {
+    L_ERROR("gl:   %s shader %u: source unknown", what, shader);
+    return;
+  }
+  L_ERROR("gl:   %s shader %u source:", what, shader);
+  char line[200];
+  int lines = 0;
+  for (const char *p = src; *p && lines < 60;) {
+    size_t n = strcspn(p, "\n");
+    snprintf(line, sizeof(line), "%.*s", (int)(n < sizeof(line) - 1 ? n : sizeof(line) - 1), p);
+    L_ERROR("gl:     %s", line);
+    p += n;
+    if (*p)
+      p++;
+    lines++;
+  }
+}
+
+static void check_link(GLuint prog) {
+  GLint ok = 0;
+  glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+  if (ok || link_failures >= 6)
+    return;
+  link_failures++;
+  L_ERROR("gl: program %u failed to link", prog);
+  if (prog < 1025) {
+    log_source("vertex", program_shaders[prog][0]);
+    log_source("fragment", program_shaders[prog][1]);
+  }
+}
+
+static int seen_format(uint32_t key) {
+  static uint32_t seen[64];
+  static int n;
+  for (int i = 0; i < n; i++)
+    if (seen[i] == key)
+      return 1;
+  if (n < 64)
+    seen[n++] = key;
+  return 0;
+}
+
+void glTexImage2D_bridge(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum fmt,
+                         GLenum type, const void *data) {
+  glTexImage2D(target, level, ifmt, w, h, border, fmt, type, data);
+  GLenum err = glGetError();
+  if (!seen_format(((uint32_t)fmt << 16) ^ type ^ ((uint32_t)ifmt << 8)) || err)
+    L_INFO("gl: glTexImage2D ifmt 0x%X fmt 0x%X type 0x%X %dx%d -> error 0x%X", ifmt, fmt, type, w, h, err);
+}
+
+void glCompressedTexImage2D_bridge(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
+                                   GLsizei size, const void *data) {
+  glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
+  GLenum err = glGetError();
+  if (!seen_format(0x80000000 | ifmt) || err)
+    L_INFO("gl: glCompressedTexImage2D ifmt 0x%X %dx%d (%d bytes) -> error 0x%X", ifmt, w, h, size, err);
+}
+
+void glDrawElements_bridge(GLenum mode, GLsizei count, GLenum type, const void *indices) {
+  draws_this_frame++;
+  glDrawElements(mode, count, type, indices);
+}
+
+void glDrawArrays_bridge(GLenum mode, GLint first, GLsizei count) {
+  draws_this_frame++;
+  glDrawArrays(mode, first, count);
+}
+
+static void gl_frame_stats(void) {
+  frames_seen++;
+  if (frames_seen == 1 || frames_seen % 600 == 0) {
+    GLenum err = glGetError();
+    L_INFO("gl: frame %u: %u draw calls, glGetError 0x%X", frames_seen, draws_this_frame, err);
+  }
+  draws_this_frame = 0;
+}
+
 // GLES lets attribute locations be bound before shaders are attached; they
 // take effect at link time. vitaGL dereferences the attached vertex shader
 // immediately, so bindings are recorded here and replayed in glLinkProgram.
@@ -315,6 +449,7 @@ void glLinkProgram_bridge(GLuint prog) {
   }
   locations_clear(prog);  // relinking invalidates every location
   glLinkProgram(prog);
+  check_link(prog);
 }
 
 void glDeleteProgram_bridge(GLuint prog) {
