@@ -92,6 +92,8 @@ Pré-requisitos: `$VITASDK` (hard-float; as chamadas soft-float do Android são 
 SRR - VITA/
 ├── SRR-VITA/      este repositório
 ├── vitaGL/        usado direto daqui (header + libvitaGL.a)
+│                 recompilado com `make HAVE_SHARK_LOG=1` após aplicar
+│                 `patches/vitagl-link-compile-failure.patch`
 ├── vitasoguide/   guia/checagem de compatibilidade
 └── vdpm/          gerenciador de pacotes do VitaSDK
 ```

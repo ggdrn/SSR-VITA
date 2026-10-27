@@ -327,6 +327,26 @@ static void log_source(const char *what, GLuint shader) {
   }
 }
 
+static void log_info(const char *what, GLuint shader) {
+  if (!shader)
+    return;
+  char buf[1024];
+  GLsizei len = 0;
+  glGetShaderInfoLog(shader, sizeof(buf), &len, buf);
+  if (len <= 0)
+    return;
+  L_ERROR("gl:   %s shader %u compiler log:", what, shader);
+  for (char *p = buf, *e; *p; p = e) {
+    e = p + strcspn(p, "\n");
+    char c = *e;
+    *e = 0;
+    if (*p)
+      L_ERROR("gl:     %s", p);
+    if (c)
+      e++;
+  }
+}
+
 static void check_link(GLuint prog) {
   GLint ok = 0;
   glGetProgramiv(prog, GL_LINK_STATUS, &ok);
@@ -337,6 +357,8 @@ static void check_link(GLuint prog) {
   link_failures++;
   L_ERROR("gl: program %u failed to link", prog);
   if (prog < 1025) {
+    log_info("vertex", program_shaders[prog][0]);
+    log_info("fragment", program_shaders[prog][1]);
     log_source("vertex", program_shaders[prog][0]);
     log_source("fragment", program_shaders[prog][1]);
   }
