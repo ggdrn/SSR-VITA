@@ -135,22 +135,22 @@ extern void __stack_chk_fail_bridge(void);
 extern void __system_property_get_bridge(void);
 extern void abort_bridge(void);
 extern void access_bridge(void);
-extern void acos(void);
-extern void acosf(void);
-extern void asin(void);
-extern void asinf(void);
-extern void atan(void);
-extern void atan2(void);
-extern void atan2f(void);
-extern void atanf(void);
+extern void acos_sfp(void);
+extern void acosf_sfp(void);
+extern void asin_sfp(void);
+extern void asinf_sfp(void);
+extern void atan2_sfp(void);
+extern void atan2f_sfp(void);
+extern void atan_sfp(void);
+extern void atanf_sfp(void);
 extern void atoi(void);
 extern void atol(void);
 extern void bsd_signal_bridge(void);
 extern void bsearch(void);
 extern void btowc(void);
 extern void calloc_bridge(void);
-extern void ceil(void);
-extern void ceilf(void);
+extern void ceil_sfp(void);
+extern void ceilf_sfp(void);
 extern void chdir_bridge(void);
 extern void chmod_bridge(void);
 extern void clearerr_bridge(void);
@@ -160,9 +160,9 @@ extern void clock_gettime_bridge(void);
 extern void clock_nanosleep_bridge(void);
 extern void close_bridge(void);
 extern void closedir_bridge(void);
-extern void cos(void);
-extern void cosf(void);
-extern void cosh(void);
+extern void cos_sfp(void);
+extern void cosf_sfp(void);
+extern void cosh_sfp(void);
 extern void crc32(void);
 extern void deflate(void);
 extern void deflateEnd(void);
@@ -188,9 +188,9 @@ extern void eglMakeCurrent_bridge(void);
 extern void eglSwapBuffers_bridge(void);
 extern void eglTerminate_bridge(void);
 extern void exit_bridge(void);
-extern void exp(void);
-extern void exp2f(void);
-extern void expf(void);
+extern void exp2f_sfp(void);
+extern void exp_sfp(void);
+extern void expf_sfp(void);
 extern void fail_bridge(void);
 extern void fclose_bridge(void);
 extern void fcntl_bridge(void);
@@ -199,10 +199,10 @@ extern void ferror_bridge(void);
 extern void fflush_bridge(void);
 extern void fgets_bridge(void);
 extern void flock_bridge(void);
-extern void floor(void);
-extern void floorf(void);
-extern void fmod(void);
-extern void fmodf(void);
+extern void floor_sfp(void);
+extern void floorf_sfp(void);
+extern void fmod_sfp(void);
+extern void fmodf_sfp(void);
 extern void fopen_bridge(void);
 extern void fprintf_bridge(void);
 extern void fputc_bridge(void);
@@ -345,10 +345,10 @@ extern void isxdigit(void);
 extern void kill_bridge(void);
 extern void ldexp_sfp(void);
 extern void localtime(void);
-extern void log(void);
-extern void log10(void);
-extern void log10f(void);
-extern void logf(void);
+extern void log10_sfp(void);
+extern void log10f_sfp(void);
+extern void log_sfp(void);
+extern void logf_sfp(void);
 extern void longjmp(void);
 extern void lrand48(void);
 extern void lseek_bridge(void);
@@ -376,8 +376,8 @@ extern void net_unavailable_bridge(void);
 extern void open_bridge(void);
 extern void opendir_bridge(void);
 extern void perror_bridge(void);
-extern void pow(void);
-extern void powf(void);
+extern void pow_sfp(void);
+extern void powf_sfp(void);
 extern void prctl_bridge(void);
 extern void printf_bridge(void);
 extern void pthread_attr_destroy_bridge(void);
@@ -430,9 +430,9 @@ extern void realloc_bridge(void);
 extern void remove(void);
 extern void rename_bridge(void);
 extern void ret0_bridge(void);
-extern void rint(void);
+extern void rint_sfp(void);
 extern void rmdir(void);
-extern void round(void);
+extern void round_sfp(void);
 extern void sched_get_priority_max_bridge(void);
 extern void sched_get_priority_min_bridge(void);
 extern void sched_yield_bridge(void);
@@ -453,15 +453,15 @@ extern void siglongjmp_bridge(void);
 extern void sigprocmask_bridge(void);
 extern void sigsetjmp_bridge(void);
 extern void sigsuspend_bridge(void);
-extern void sin(void);
-extern void sinf(void);
-extern void sinh(void);
+extern void sin_sfp(void);
+extern void sinf_sfp(void);
+extern void sinh_sfp(void);
 extern void slCreateEngine_bridge(void);
 extern void sleep_bridge(void);
 extern void snprintf_bridge(void);
 extern void sprintf_bridge(void);
-extern void sqrt(void);
-extern void sqrtf(void);
+extern void sqrt_sfp(void);
+extern void sqrtf_sfp(void);
 extern void srand48(void);
 extern void sscanf_bridge(void);
 extern void stat_bridge(void);
@@ -494,15 +494,15 @@ extern void strtoull(void);
 extern void strxfrm(void);
 extern void syscall_bridge(void);
 extern void sysconf_bridge(void);
-extern void tan(void);
-extern void tanf(void);
-extern void tanh(void);
+extern void tan_sfp(void);
+extern void tanf_sfp(void);
+extern void tanh_sfp(void);
 extern void time_bridge(void);
 extern void tkill_bridge(void);
 extern void tolower(void);
 extern void towlower(void);
 extern void towupper(void);
-extern void trunc(void);
+extern void trunc_sfp(void);
 extern void truncate_bridge(void);
 extern void uname_bridge(void);
 extern void ungetc_bridge(void);
@@ -682,14 +682,14 @@ const so_default_dynlib default_dynlib[] = {
   {"abort", (uintptr_t)&abort_bridge},
   {"accept", (uintptr_t)&net_unavailable_bridge},
   {"access", (uintptr_t)&access_bridge},
-  {"acos", (uintptr_t)&acos},
-  {"acosf", (uintptr_t)&acosf},
-  {"asin", (uintptr_t)&asin},
-  {"asinf", (uintptr_t)&asinf},
-  {"atan", (uintptr_t)&atan},
-  {"atan2", (uintptr_t)&atan2},
-  {"atan2f", (uintptr_t)&atan2f},
-  {"atanf", (uintptr_t)&atanf},
+  {"acos", (uintptr_t)&acos_sfp},
+  {"acosf", (uintptr_t)&acosf_sfp},
+  {"asin", (uintptr_t)&asin_sfp},
+  {"asinf", (uintptr_t)&asinf_sfp},
+  {"atan", (uintptr_t)&atan_sfp},
+  {"atan2", (uintptr_t)&atan2_sfp},
+  {"atan2f", (uintptr_t)&atan2f_sfp},
+  {"atanf", (uintptr_t)&atanf_sfp},
   {"atoi", (uintptr_t)&atoi},
   {"atol", (uintptr_t)&atol},
   {"bind", (uintptr_t)&net_unavailable_bridge},
@@ -697,8 +697,8 @@ const so_default_dynlib default_dynlib[] = {
   {"bsearch", (uintptr_t)&bsearch},
   {"btowc", (uintptr_t)&btowc},
   {"calloc", (uintptr_t)&calloc_bridge},
-  {"ceil", (uintptr_t)&ceil},
-  {"ceilf", (uintptr_t)&ceilf},
+  {"ceil", (uintptr_t)&ceil_sfp},
+  {"ceilf", (uintptr_t)&ceilf_sfp},
   {"chdir", (uintptr_t)&chdir_bridge},
   {"chmod", (uintptr_t)&chmod_bridge},
   {"clearerr", (uintptr_t)&clearerr_bridge},
@@ -709,9 +709,9 @@ const so_default_dynlib default_dynlib[] = {
   {"close", (uintptr_t)&close_bridge},
   {"closedir", (uintptr_t)&closedir_bridge},
   {"connect", (uintptr_t)&net_unavailable_bridge},
-  {"cos", (uintptr_t)&cos},
-  {"cosf", (uintptr_t)&cosf},
-  {"cosh", (uintptr_t)&cosh},
+  {"cos", (uintptr_t)&cos_sfp},
+  {"cosf", (uintptr_t)&cosf_sfp},
+  {"cosh", (uintptr_t)&cosh_sfp},
   {"crc32", (uintptr_t)&crc32},
   {"deflate", (uintptr_t)&deflate},
   {"deflateEnd", (uintptr_t)&deflateEnd},
@@ -743,9 +743,9 @@ const so_default_dynlib default_dynlib[] = {
   {"execv", (uintptr_t)&fail_bridge},
   {"execve", (uintptr_t)&fail_bridge},
   {"exit", (uintptr_t)&exit_bridge},
-  {"exp", (uintptr_t)&exp},
-  {"exp2f", (uintptr_t)&exp2f},
-  {"expf", (uintptr_t)&expf},
+  {"exp", (uintptr_t)&exp_sfp},
+  {"exp2f", (uintptr_t)&exp2f_sfp},
+  {"expf", (uintptr_t)&expf_sfp},
   {"fclose", (uintptr_t)&fclose_bridge},
   {"fcntl", (uintptr_t)&fcntl_bridge},
   {"fdopen", (uintptr_t)&fdopen_bridge},
@@ -753,10 +753,10 @@ const so_default_dynlib default_dynlib[] = {
   {"fflush", (uintptr_t)&fflush_bridge},
   {"fgets", (uintptr_t)&fgets_bridge},
   {"flock", (uintptr_t)&flock_bridge},
-  {"floor", (uintptr_t)&floor},
-  {"floorf", (uintptr_t)&floorf},
-  {"fmod", (uintptr_t)&fmod},
-  {"fmodf", (uintptr_t)&fmodf},
+  {"floor", (uintptr_t)&floor_sfp},
+  {"floorf", (uintptr_t)&floorf_sfp},
+  {"fmod", (uintptr_t)&fmod_sfp},
+  {"fmodf", (uintptr_t)&fmodf_sfp},
   {"fopen", (uintptr_t)&fopen_bridge},
   {"fork", (uintptr_t)&fail_bridge},
   {"fprintf", (uintptr_t)&fprintf_bridge},
@@ -915,10 +915,10 @@ const so_default_dynlib default_dynlib[] = {
   {"ldexp", (uintptr_t)&ldexp_sfp},
   {"listen", (uintptr_t)&net_unavailable_bridge},
   {"localtime", (uintptr_t)&localtime},
-  {"log", (uintptr_t)&log},
-  {"log10", (uintptr_t)&log10},
-  {"log10f", (uintptr_t)&log10f},
-  {"logf", (uintptr_t)&logf},
+  {"log", (uintptr_t)&log_sfp},
+  {"log10", (uintptr_t)&log10_sfp},
+  {"log10f", (uintptr_t)&log10f_sfp},
+  {"logf", (uintptr_t)&logf_sfp},
   {"longjmp", (uintptr_t)&longjmp},
   {"lrand48", (uintptr_t)&lrand48},
   {"lseek", (uintptr_t)&lseek_bridge},
@@ -950,8 +950,8 @@ const so_default_dynlib default_dynlib[] = {
   {"pipe", (uintptr_t)&net_unavailable_bridge},
   {"poll", (uintptr_t)&net_unavailable_bridge},
   {"popen", (uintptr_t)&ret0_bridge},
-  {"pow", (uintptr_t)&pow},
-  {"powf", (uintptr_t)&powf},
+  {"pow", (uintptr_t)&pow_sfp},
+  {"powf", (uintptr_t)&powf_sfp},
   {"prctl", (uintptr_t)&prctl_bridge},
   {"printf", (uintptr_t)&printf_bridge},
   {"pthread_attr_destroy", (uintptr_t)&pthread_attr_destroy_bridge},
@@ -1009,9 +1009,9 @@ const so_default_dynlib default_dynlib[] = {
   {"recvmsg", (uintptr_t)&net_unavailable_bridge},
   {"remove", (uintptr_t)&remove},
   {"rename", (uintptr_t)&rename_bridge},
-  {"rint", (uintptr_t)&rint},
+  {"rint", (uintptr_t)&rint_sfp},
   {"rmdir", (uintptr_t)&rmdir},
-  {"round", (uintptr_t)&round},
+  {"round", (uintptr_t)&round_sfp},
   {"sched_get_priority_max", (uintptr_t)&sched_get_priority_max_bridge},
   {"sched_get_priority_min", (uintptr_t)&sched_get_priority_min_bridge},
   {"sched_yield", (uintptr_t)&sched_yield_bridge},
@@ -1041,16 +1041,16 @@ const so_default_dynlib default_dynlib[] = {
   {"sigprocmask", (uintptr_t)&sigprocmask_bridge},
   {"sigsetjmp", (uintptr_t)&sigsetjmp_bridge},
   {"sigsuspend", (uintptr_t)&sigsuspend_bridge},
-  {"sin", (uintptr_t)&sin},
-  {"sinf", (uintptr_t)&sinf},
-  {"sinh", (uintptr_t)&sinh},
+  {"sin", (uintptr_t)&sin_sfp},
+  {"sinf", (uintptr_t)&sinf_sfp},
+  {"sinh", (uintptr_t)&sinh_sfp},
   {"slCreateEngine", (uintptr_t)&slCreateEngine_bridge},
   {"sleep", (uintptr_t)&sleep_bridge},
   {"snprintf", (uintptr_t)&snprintf_bridge},
   {"socket", (uintptr_t)&net_unavailable_bridge},
   {"sprintf", (uintptr_t)&sprintf_bridge},
-  {"sqrt", (uintptr_t)&sqrt},
-  {"sqrtf", (uintptr_t)&sqrtf},
+  {"sqrt", (uintptr_t)&sqrt_sfp},
+  {"sqrtf", (uintptr_t)&sqrtf_sfp},
   {"srand48", (uintptr_t)&srand48},
   {"sscanf", (uintptr_t)&sscanf_bridge},
   {"stat", (uintptr_t)&stat_bridge},
@@ -1084,15 +1084,15 @@ const so_default_dynlib default_dynlib[] = {
   {"syscall", (uintptr_t)&syscall_bridge},
   {"sysconf", (uintptr_t)&sysconf_bridge},
   {"system", (uintptr_t)&fail_bridge},
-  {"tan", (uintptr_t)&tan},
-  {"tanf", (uintptr_t)&tanf},
-  {"tanh", (uintptr_t)&tanh},
+  {"tan", (uintptr_t)&tan_sfp},
+  {"tanf", (uintptr_t)&tanf_sfp},
+  {"tanh", (uintptr_t)&tanh_sfp},
   {"time", (uintptr_t)&time_bridge},
   {"tkill", (uintptr_t)&tkill_bridge},
   {"tolower", (uintptr_t)&tolower},
   {"towlower", (uintptr_t)&towlower},
   {"towupper", (uintptr_t)&towupper},
-  {"trunc", (uintptr_t)&trunc},
+  {"trunc", (uintptr_t)&trunc_sfp},
   {"truncate", (uintptr_t)&truncate_bridge},
   {"uname", (uintptr_t)&uname_bridge},
   {"ungetc", (uintptr_t)&ungetc_bridge},

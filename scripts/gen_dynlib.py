@@ -115,9 +115,20 @@ def sdk_symbols():
 def bridge_symbols():
     found = set()
     pattern = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*_(?:bridge|sfp|bionic))\b\s*[\(\[=;]")
+    # math_bridge.c defines most shims through D1(sin), F2(powf), ... macros.
+    macro = re.compile(r"\b[DF][12]\((\w+)\)")
     for path in glob.glob(os.path.join(ROOT, "src", "**", "*.c"), recursive=True):
-        found.update(pattern.findall(open(path).read()))
+        text = open(path).read()
+        found.update(pattern.findall(text))
+        found.update(name + "_sfp" for name in macro.findall(text))
     return found
+
+
+# Functions that pass or return float/double in registers: on the hard-float
+# Vita they must go through a soft-float shim, never straight to newlib.
+FLOAT_ABI = set("""acos acosf asin asinf atan atan2 atan2f atanf ceil ceilf cos cosf cosh exp exp2f expf floor
+floorf fmod fmodf frexp ldexp log log10 log10f logf modf modff pow powf rint round sin sinf sinh sqrt
+sqrtf tan tanf tanh trunc strtod isnan __fpclassifyf""".split())
 
 
 def main():
@@ -143,6 +154,10 @@ def main():
             funcs.append((name, name))
         else:
             unmapped.append(name)
+
+    wrong = [n for n, t in funcs if n in FLOAT_ABI and not t.endswith("_sfp")]
+    if wrong:
+        sys.exit("soft-float shim missing for: " + " ".join(wrong))
 
     targets_f = sorted({t for _, t in funcs})
     targets_d = sorted({t for _, t in data})
