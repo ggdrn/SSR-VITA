@@ -172,6 +172,11 @@ SOFTFP float AMotionEvent_getOrientation_bridge(const input_event *e, size_t i) 
 SOFTFP float AMotionEvent_getAxisValue_bridge(const input_event *e, int axis, size_t i) {
   return axis == 0 ? e->pointers[i].x : axis == 1 ? e->pointers[i].y : 0.0f;
 }
+// libmain exports these three as function-pointer variables, not functions.
+void *_MotionEvent_getAxisValue_bridge = (void *)AMotionEvent_getAxisValue_bridge;
+void *_MotionEvent_getButtonState_bridge = (void *)AMotionEvent_getButtonState_bridge;
+void *_MotionEvent_getToolType_bridge = (void *)AMotionEvent_getToolType_bridge;
+
 size_t AMotionEvent_getHistorySize_bridge(const input_event *e) { return 0; }
 int64_t AMotionEvent_getHistoricalEventTime_bridge(const input_event *e, size_t h) { return e->event_time; }
 SOFTFP float AMotionEvent_getHistoricalX_bridge(const input_event *e, size_t i, size_t h) { return e->pointers[i].x; }

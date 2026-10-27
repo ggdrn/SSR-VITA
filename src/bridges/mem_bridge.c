@@ -151,6 +151,10 @@ void *mremap_bridge(void *old, size_t old_len, size_t new_len, int flags) {
 // --- dlfcn ------------------------------------------------------------------
 
 #define DL_DEFAULT_HANDLE ((void *)0xD1D1D1D1)
+// Discord Rich Presence has no Vita counterpart; every export becomes a no-op
+// so the game's per-frame DiscordRpc calls stop throwing DllNotFoundException.
+#define DL_DISCORD_HANDLE ((void *)0xD15C0001)
+int ret0_bridge(void);
 static const char *dl_error;
 
 void *dlopen_bridge(const char *name, int flags) {
@@ -158,8 +162,12 @@ void *dlopen_bridge(const char *name, int flags) {
     return DL_DEFAULT_HANDLE;
   so_module *m = so_find_module(name);
   if (m) {
-    L_INFO("dlopen(%s) -> %s", name, m->name);
+    L_DEBUG("dlopen(%s) -> %s", name, m->name);
     return m;
+  }
+  if (strstr(name, "discord-rpc")) {
+    L_DEBUG("dlopen(%s) -> no-op stub", name);
+    return DL_DISCORD_HANDLE;
   }
   // System libraries are served by the bridge table.
   static const char *system_libs[] = {"libc", "libm", "libdl", "liblog", "libGLES", "libEGL", "libz",
@@ -176,6 +184,8 @@ void *dlopen_bridge(const char *name, int flags) {
 }
 
 void *dlsym_bridge(void *handle, const char *sym) {
+  if (handle == DL_DISCORD_HANDLE)
+    return (void *)ret0_bridge;
   uintptr_t addr = 0;
   if (handle && handle != DL_DEFAULT_HANDLE)
     addr = so_symbol((so_module *)handle, sym);

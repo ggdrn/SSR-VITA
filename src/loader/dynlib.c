@@ -29,8 +29,6 @@ extern void ALooper_pollAll_bridge(void);
 extern void ALooper_prepare_bridge(void);
 extern void ALooper_wake_bridge(void);
 extern void AMotionEvent_getAction_bridge(void);
-extern void AMotionEvent_getAxisValue_bridge(void);
-extern void AMotionEvent_getButtonState_bridge(void);
 extern void AMotionEvent_getDownTime_bridge(void);
 extern void AMotionEvent_getEdgeFlags_bridge(void);
 extern void AMotionEvent_getEventTime_bridge(void);
@@ -49,7 +47,6 @@ extern void AMotionEvent_getPressure_bridge(void);
 extern void AMotionEvent_getSize_bridge(void);
 extern void AMotionEvent_getToolMajor_bridge(void);
 extern void AMotionEvent_getToolMinor_bridge(void);
-extern void AMotionEvent_getToolType_bridge(void);
 extern void AMotionEvent_getTouchMajor_bridge(void);
 extern void AMotionEvent_getTouchMinor_bridge(void);
 extern void AMotionEvent_getXPrecision_bridge(void);
@@ -537,6 +534,9 @@ extern char SL_IID_BUFFERQUEUE_bridge[];
 extern char SL_IID_ENGINE_bridge[];
 extern char SL_IID_PLAY_bridge[];
 extern char SL_IID_VOLUME_bridge[];
+extern char _MotionEvent_getAxisValue_bridge[];
+extern char _MotionEvent_getButtonState_bridge[];
+extern char _MotionEvent_getToolType_bridge[];
 extern const char _ZSt7nothrow;
 extern char __page_size_bridge[];
 extern char __sF_bionic[];
@@ -619,9 +619,6 @@ const so_default_dynlib default_dynlib[] = {
   {"SHA1Final", (uintptr_t)&SHA1Final_bridge},
   {"SHA1Init", (uintptr_t)&SHA1Init_bridge},
   {"SHA1Update", (uintptr_t)&SHA1Update_bridge},
-  {"_MotionEvent_getAxisValue", (uintptr_t)&AMotionEvent_getAxisValue_bridge},
-  {"_MotionEvent_getButtonState", (uintptr_t)&AMotionEvent_getButtonState_bridge},
-  {"_MotionEvent_getToolType", (uintptr_t)&AMotionEvent_getToolType_bridge},
   {"_Unwind_Backtrace", (uintptr_t)&_Unwind_Backtrace},
   {"_Unwind_Complete", (uintptr_t)&_Unwind_Complete},
   {"_Unwind_DeleteException", (uintptr_t)&_Unwind_DeleteException},
@@ -1128,6 +1125,9 @@ const so_default_dynlib default_dynlib[] = {
   {"SL_IID_ENGINE", (uintptr_t)&SL_IID_ENGINE_bridge},
   {"SL_IID_PLAY", (uintptr_t)&SL_IID_PLAY_bridge},
   {"SL_IID_VOLUME", (uintptr_t)&SL_IID_VOLUME_bridge},
+  {"_MotionEvent_getAxisValue", (uintptr_t)&_MotionEvent_getAxisValue_bridge},
+  {"_MotionEvent_getButtonState", (uintptr_t)&_MotionEvent_getButtonState_bridge},
+  {"_MotionEvent_getToolType", (uintptr_t)&_MotionEvent_getToolType_bridge},
   {"_ZSt7nothrow", (uintptr_t)&_ZSt7nothrow},
   {"__data_start", (uintptr_t)&data_start_bridge},
   {"__page_size", (uintptr_t)&__page_size_bridge},

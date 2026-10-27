@@ -39,9 +39,6 @@ ALIASES = {
     "_Z42ANativeActivity_setFirstLevelHasBeenLoadedb": "ANativeActivity_setFirstLevelHasBeenLoaded_bridge",
     "_Z42ANativeActivity_forwardMotionEventToDalvikP11AInputEventP7_JNIEnv":
         "ANativeActivity_forwardMotionEventToDalvik_bridge",
-    "_MotionEvent_getAxisValue": "AMotionEvent_getAxisValue_bridge",
-    "_MotionEvent_getButtonState": "AMotionEvent_getButtonState_bridge",
-    "_MotionEvent_getToolType": "AMotionEvent_getToolType_bridge",
     # Processes, users and signals that have no Vita meaning.
     "setitimer": "ret0_bridge",
     "getpwnam": "ret0_bridge",
@@ -84,6 +81,11 @@ DATA = {
     "SL_IID_BUFFERQUEUE": "SL_IID_BUFFERQUEUE_bridge",
     "SL_IID_VOLUME": "SL_IID_VOLUME_bridge",
     "_ZSt7nothrow": "_ZSt7nothrow",
+    # libmain exports these as function-pointer *variables* (it dlsym()s them
+    # from libandroid); libunity loads the pointer and calls through it.
+    "_MotionEvent_getAxisValue": "_MotionEvent_getAxisValue_bridge",
+    "_MotionEvent_getButtonState": "_MotionEvent_getButtonState_bridge",
+    "_MotionEvent_getToolType": "_MotionEvent_getToolType_bridge",
 }
 
 # BSD sockets need constant/struct translation that is not written yet.
