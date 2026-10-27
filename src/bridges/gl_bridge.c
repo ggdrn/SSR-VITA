@@ -6,7 +6,9 @@
 #include "../config.h"
 #include "../util/log.h"
 
+#include <ctype.h>
 #include <stdio.h>
+#include <psp2/kernel/processmgr.h>
 #include <stdlib.h>
 #include <string.h>
 #include <vitaGL.h>
@@ -240,23 +242,76 @@ static char *shader_sources[MAX_SHADERS];
 static GLuint program_shaders[1025][2];
 static unsigned draws_this_frame, frames_seen;
 static int link_failures, links_ok;
+static uint8_t prog_linked[1025];
+static unsigned draws_skipped, draws_no_program;
+static uint64_t link_us_total;
+static unsigned links_total, slow_links;
+
+// Unity's fixed-function emulation shaders name a local "texture", which is
+// fine in GLSL ES but a reserved word for the Vita's Cg compiler. Such words
+// are renamed (whole identifiers only, so texture2D is untouched).
+static const char *const cg_reserved[] = {"texture", "sampler", "pass", "technique", "compile", "string"};
+
+static int is_ident(char c) { return isalnum((unsigned char)c) || c == '_'; }
+
+static char *rename_reserved(const char *src) {
+  size_t len = strlen(src), extra = 0;
+  for (int pass = 0; pass < 2; pass++) {
+    char *out = pass ? malloc(len + extra + 1) : NULL, *o = out;
+    for (const char *p = src; *p;) {
+      if (is_ident(*p) && (p == src || !is_ident(p[-1]))) {
+        const char *e = p;
+        while (is_ident(*e))
+          e++;
+        int reserved = 0;
+        for (unsigned i = 0; i < sizeof(cg_reserved) / sizeof(*cg_reserved); i++)
+          if (strlen(cg_reserved[i]) == (size_t)(e - p) && !memcmp(p, cg_reserved[i], e - p))
+            reserved = 1;
+        if (pass) {
+          memcpy(o, p, e - p);
+          o += e - p;
+          if (reserved) {
+            memcpy(o, "_srr", 4);
+            o += 4;
+          }
+        } else if (reserved) {
+          extra += 4;
+        }
+        p = e;
+      } else {
+        if (pass)
+          *o++ = *p;
+        p++;
+      }
+    }
+    if (pass) {
+      *o = 0;
+      return out;
+    }
+  }
+  return NULL;
+}
 
 void glShaderSource_bridge(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
-  if (shader < MAX_SHADERS) {
-    size_t total = 0;
-    for (int i = 0; i < count; i++)
-      total += lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
-    free(shader_sources[shader]);
-    char *src = malloc(total + 1), *p = src;
-    for (int i = 0; i < count; i++) {
-      size_t n = lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
-      memcpy(p, strings[i], n);
-      p += n;
-    }
-    *p = 0;
-    shader_sources[shader] = src;
+  size_t total = 0;
+  for (int i = 0; i < count; i++)
+    total += lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+  char *joined = malloc(total + 1), *p = joined;
+  for (int i = 0; i < count; i++) {
+    size_t n = lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+    memcpy(p, strings[i], n);
+    p += n;
   }
-  glShaderSource(shader, count, strings, lengths);
+  *p = 0;
+  char *src = rename_reserved(joined);
+  free(joined);
+  glShaderSource(shader, 1, (const GLchar *const *)&src, NULL);
+  if (shader < MAX_SHADERS) {
+    free(shader_sources[shader]);
+    shader_sources[shader] = src;
+  } else {
+    free(src);
+  }
 }
 
 // --- deferred shader deletion ------------------------------------------------
@@ -350,6 +405,8 @@ static void log_info(const char *what, GLuint shader) {
 static void check_link(GLuint prog) {
   GLint ok = 0;
   glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+  if (prog < 1025)
+    prog_linked[prog] = ok != 0;
   if (ok)
     links_ok++;
   if (ok || link_failures >= 6)
@@ -428,13 +485,32 @@ void glDisable_bridge(GLenum cap) {
   check_param("glDisable", cap, 0);
 }
 
-void glDrawElements_bridge(GLenum mode, GLsizei count, GLenum type, const void *indices) {
+// vitaGL draws with whatever state an unlinked program left behind, which can
+// crash on the GPU side; such draws are skipped and counted instead.
+static GLuint current_program;
+
+static int draw_allowed(void) {
   draws_this_frame++;
+  if (!current_program) {
+    draws_no_program++;
+    return 1;
+  }
+  if (current_program < 1025 && !prog_linked[current_program]) {
+    draws_skipped++;
+    return 0;
+  }
+  return 1;
+}
+
+void glDrawElements_bridge(GLenum mode, GLsizei count, GLenum type, const void *indices) {
+  if (!draw_allowed())
+    return;
   glDrawElements(mode, count, type, indices);
 }
 
 void glDrawArrays_bridge(GLenum mode, GLint first, GLsizei count) {
-  draws_this_frame++;
+  if (!draw_allowed())
+    return;
   glDrawArrays(mode, first, count);
 }
 
@@ -444,6 +520,9 @@ static void gl_frame_stats(void) {
     GLenum err = glGetError();
     L_INFO("gl: frame %u: %u draw calls, glGetError 0x%X, programs linked %d (failed %d)", frames_seen,
            draws_this_frame, err, links_ok, link_failures);
+    L_INFO("gl:   draws skipped (unlinked program) %u, without program %u; %u links took %u ms (%u over 100 ms)",
+           draws_skipped, draws_no_program, links_total, (unsigned)(link_us_total / 1000), slow_links);
+    draws_skipped = draws_no_program = 0;
   }
   draws_this_frame = 0;
 }
@@ -490,7 +569,6 @@ typedef struct {
 } location_table;
 
 static location_table locations[MAX_PROGRAMS];
-static GLuint current_program;
 
 static void locations_clear(GLuint prog) {
   if (prog < MAX_PROGRAMS) {
@@ -556,7 +634,18 @@ void glLinkProgram_bridge(GLuint prog) {
       glBindAttribLocation(prog, b->index, b->name);
   }
   locations_clear(prog);  // relinking invalidates every location
+  // Shaders are compiled here (vitaGL's postponed mode), so this is where
+  // loading time goes; the shader cache makes later runs skip it.
+  SceUInt64 t0 = sceKernelGetProcessTimeWide();
   glLinkProgram(prog);
+  SceUInt64 us = sceKernelGetProcessTimeWide() - t0;
+  links_total++;
+  link_us_total += us;
+  if (us > 100000) {
+    slow_links++;
+    if (slow_links <= 10)
+      L_INFO("gl: program %u took %u ms to compile and link", prog, (unsigned)(us / 1000));
+  }
   check_link(prog);
 }
 
@@ -577,6 +666,7 @@ void glDeleteProgram_bridge(GLuint prog) {
     vs = program_shaders[prog][0];
     fs = program_shaders[prog][1];
     program_shaders[prog][0] = program_shaders[prog][1] = 0;
+    prog_linked[prog] = 0;
   }
   glDeleteProgram(prog);
   release_if_unused(vs);
@@ -585,6 +675,7 @@ void glDeleteProgram_bridge(GLuint prog) {
 
 void gl_bridge_init(void) {
   vglSetupRuntimeShaderCompiler(SHARK_OPT_UNSAFE, SHARK_ENABLE, SHARK_ENABLE, SHARK_ENABLE);
+  vglSetShaderCachePath(DATA_PATH "/shader_cache");
   vglInitExtended(0, SCREEN_W, SCREEN_H, VGL_RAM_THRESHOLD, SCE_GXM_MULTISAMPLE_NONE);
   L_INFO("gl: vitaGL ready (%dx%d)", SCREEN_W, SCREEN_H);
 }

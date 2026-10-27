@@ -27,7 +27,7 @@ ALIASES = {
     "_exit": "exit_bridge",
     "putc": "fputc_bridge",
     "pthread_sigmask": "sigprocmask_bridge",
-    "g_free": "free",
+    "g_free": "free_bridge",
     # Defined in assembly (libc_bridge.c), invisible to the scan below.
     "sigsetjmp": "sigsetjmp_bridge",
     "siglongjmp": "siglongjmp_bridge",

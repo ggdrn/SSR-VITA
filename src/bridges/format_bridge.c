@@ -2,13 +2,18 @@
 // "zu" without consuming its argument, shifting every later argument (Unity
 // crashed in strlen() this way). Bionic supports them, so guest format strings
 // are rewritten before reaching newlib: z/t are dropped (32-bit on ARM) and j
-// becomes ll. Also: allocation failures are logged with their caller.
+// becomes ll. Also: allocation failures are logged with their caller, and
+// guest free()/realloc() calls are checked against the newlib heap so a bad
+// pointer is logged and ignored instead of corrupting the allocator.
 
 #define _GNU_SOURCE  // vasprintf
 #include "bridges.h"
+#include "../loader/so_util.h"
 #include "../util/log.h"
 
 #include <malloc.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,6 +97,50 @@ static void alloc_failed(const char *what, size_t size, size_t align, void *call
           mi.arena / 1024, mi.uordblks / 1024, mi.fordblks / 1024);
 }
 
+// newlib (dlmalloc) chunk layout: the size word sits 4 bytes before the user
+// pointer with PREV_INUSE in bit 0; the next chunk's PREV_INUSE bit tells
+// whether this chunk is currently allocated.
+extern char *__malloc_sbrk_base;
+extern void *sbrk(ptrdiff_t);
+
+static const char *bad_chunk(void *ptr) {
+  uintptr_t p = (uintptr_t)ptr, lo = (uintptr_t)__malloc_sbrk_base, hi = (uintptr_t)sbrk(0);
+  if (p & 7)
+    return "misaligned";
+  if (lo == (uintptr_t)-1 || p < lo + 8 || p >= hi)
+    return "outside the heap";
+  uint32_t size = ((uint32_t *)p)[-1] & ~7u;
+  uintptr_t next = p - 8 + size;
+  if (size < 16 || next + 8 > hi)
+    return "corrupt chunk size";
+  if (!(((uint32_t *)next)[1] & 1))
+    return "already free";
+  return NULL;
+}
+
+static int bad_free_reports;
+
+static int reject_free(const char *what, void *ptr, void *caller) {
+  const char *why = bad_chunk(ptr);
+  if (!why)
+    return 0;
+  if (bad_free_reports < 32) {
+    bad_free_reports++;
+    so_module *m = so_module_at((uintptr_t)caller);
+    if (m)
+      L_ERROR("%s(%p) ignored: %s, from %s+0x%X", what, ptr, why, m->name, (uintptr_t)caller - m->base);
+    else
+      L_ERROR("%s(%p) ignored: %s, from %p", what, ptr, why, caller);
+  }
+  return 1;
+}
+
+void free_bridge(void *ptr) {
+  if (ptr && reject_free("free", ptr, __builtin_return_address(0)))
+    return;
+  free(ptr);
+}
+
 void *malloc_bridge(size_t size) {
   void *p = malloc(size);
   if (!p && size)
@@ -107,6 +156,9 @@ void *calloc_bridge(size_t n, size_t size) {
 }
 
 void *realloc_bridge(void *old, size_t size) {
+  // The old block's contents can't be trusted, so start a fresh one.
+  if (old && reject_free("realloc", old, __builtin_return_address(0)))
+    old = NULL;
   void *p = realloc(old, size);
   if (!p && size)
     alloc_failed("realloc", size, 0, __builtin_return_address(0));

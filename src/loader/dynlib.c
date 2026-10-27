@@ -208,7 +208,7 @@ extern void fprintf_bridge(void);
 extern void fputc_bridge(void);
 extern void fputs_bridge(void);
 extern void fread_bridge(void);
-extern void free(void);
+extern void free_bridge(void);
 extern void frexp_sfp(void);
 extern void fscanf_bridge(void);
 extern void fseek_bridge(void);
@@ -763,7 +763,7 @@ const so_default_dynlib default_dynlib[] = {
   {"fputc", (uintptr_t)&fputc_bridge},
   {"fputs", (uintptr_t)&fputs_bridge},
   {"fread", (uintptr_t)&fread_bridge},
-  {"free", (uintptr_t)&free},
+  {"free", (uintptr_t)&free_bridge},
   {"freeaddrinfo", (uintptr_t)&ret0_bridge},
   {"frexp", (uintptr_t)&frexp_sfp},
   {"fscanf", (uintptr_t)&fscanf_bridge},
@@ -773,7 +773,7 @@ const so_default_dynlib default_dynlib[] = {
   {"ftell", (uintptr_t)&ftell_bridge},
   {"ftruncate", (uintptr_t)&ftruncate_bridge},
   {"fwrite", (uintptr_t)&fwrite_bridge},
-  {"g_free", (uintptr_t)&free},
+  {"g_free", (uintptr_t)&free_bridge},
   {"gai_strerror", (uintptr_t)&gai_strerror_bridge},
   {"getaddrinfo", (uintptr_t)&net_unavailable_bridge},
   {"getc", (uintptr_t)&getc_bridge},
