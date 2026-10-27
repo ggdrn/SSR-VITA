@@ -15,6 +15,8 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/threadmgr.h>
+
+#include "../net/http.h"
 #include <psp2/system_param.h>
 
 void audio_fmod_start(void);
@@ -435,27 +437,146 @@ static jvalue string_equals(jobj *self, const jvalue *a) {
   return RET_BOOL(strcmp(jni_string_utf8(self), jni_string_utf8(a[0].l)) == 0);
 }
 
+// --- java.util.HashMap --------------------------------------------------------
+// Unity builds the WWW request headers in a HashMap through JNI.
+
+#define MAP_MAX 64
+typedef struct {
+  int n;
+  jobj *keys[MAP_MAX];
+  jobj *values[MAP_MAX];
+} hash_map;
+
+static hash_map *map_of(jobj *self) {
+  if (!self)
+    return NULL;
+  if (!self->native)
+    self->native = calloc(1, sizeof(hash_map));
+  return self->native;
+}
+
+static jvalue hashmap_put(jobj *self, const jvalue *a) {
+  hash_map *m = map_of(self);
+  const char *key = jni_string_utf8(a[0].l);
+  for (int i = 0; m && i < m->n; i++) {
+    if (strcmp(jni_string_utf8(m->keys[i]), key) == 0) {
+      jobj *old = m->values[i];
+      m->values[i] = a[1].l;
+      return RET_OBJ(old);
+    }
+  }
+  if (m && m->n < MAP_MAX) {
+    m->keys[m->n] = a[0].l;
+    m->values[m->n++] = a[1].l;
+  }
+  return RET_OBJ(NULL);
+}
+
+static jvalue hashmap_get(jobj *self, const jvalue *a) {
+  hash_map *m = map_of(self);
+  const char *key = jni_string_utf8(a[0].l);
+  for (int i = 0; m && i < m->n; i++)
+    if (strcmp(jni_string_utf8(m->keys[i]), key) == 0)
+      return RET_OBJ(m->values[i]);
+  return RET_OBJ(NULL);
+}
+
+static jvalue hashmap_size(jobj *self, const jvalue *a) { return RET_INT(map_of(self) ? map_of(self)->n : 0); }
+
 // --- com.unity3d.player.WWW ---------------------------------------------------
-// Unity's HTTP goes through this Java class: the constructor starts a thread
-// that reports back through static natives. There is no HTTP stack yet, so
-// every request fails with an error the game can handle.
+// Unity's HTTP goes through this Java class: the constructor (id, url, post
+// data, headers) starts a thread that reports back through static natives.
+// `id` is really a pointer to Unity's native request. The natives return
+// true to abort. headerCallback appends raw text to Unity's header buffer, so
+// lines are sent with CRLF and the status line first (WWW.responseHeaders
+// "STATUS"). The transfer itself is src/net/http.c (sockets + mbedTLS).
+
+#define WWW_CLASS "com/unity3d/player/WWW"
+#define WWW_CHUNK 16384
 
 typedef struct {
   int id;
-  char url[512];
+  char *url;
+  uint8_t *body;
+  size_t body_len;
+  http_header headers[MAP_MAX];
+  int num_headers;
+  void *env;
+  jobj *cls;
+  jobj *chunk;  // reused byte[] handed to readCallback
+  uint8_t (*header_cb)(void *, jobj *, int, jobj *);
+  uint8_t (*read_cb)(void *, jobj *, int, jobj *, int);
+  void (*error_cb)(void *, jobj *, int, jobj *);
+  void (*done_cb)(void *, jobj *, int);
 } www_request;
+
+static int www_send_header(www_request *r, const char *text) {
+  if (!r->header_cb)
+    return 1;
+  return !r->header_cb(r->env, r->cls, r->id, jni_new_string(text));
+}
+
+static int www_on_status(void *user, int code, const char *line) {
+  char buf[300];
+  snprintf(buf, sizeof(buf), "%s\r\n", line);
+  return www_send_header(user, buf);
+}
+
+static int www_on_header(void *user, const char *name, const char *value) {
+  char buf[4200];
+  snprintf(buf, sizeof(buf), "%s: %s\r\n", name, value);
+  return www_send_header(user, buf);
+}
+
+static int www_on_data(void *user, const uint8_t *data, size_t len, size_t received, size_t total) {
+  www_request *r = user;
+  if (!r->read_cb)
+    return 1;
+  while (len) {
+    size_t n = len < WWW_CHUNK ? len : WWW_CHUNK;
+    memcpy(r->chunk->arr.data, data, n);
+    if (r->read_cb(r->env, r->cls, r->id, r->chunk, (int)n))
+      return 0;  // Unity aborted (WWW disposed)
+    data += n;
+    len -= n;
+  }
+  return 1;
+}
 
 static int www_thread(SceSize args, void *argp) {
   www_request *r = *(www_request **)argp;
-  void *env = jni_get_env();
-  jobj *cls = jni_find_class("com/unity3d/player/WWW");
-  void (*error_cb)(void *, jobj *, int, jobj *) = jni_find_native("com/unity3d/player/WWW", "errorCallback");
-  void (*done_cb)(void *, jobj *, int) = jni_find_native("com/unity3d/player/WWW", "doneCallback");
-  L_WARN("www: request %d to %s failed (no HTTP support yet)", r->id, r->url);
-  if (error_cb)
-    error_cb(env, cls, r->id, jni_new_string("Network is not available"));
-  if (done_cb)
-    done_cb(env, cls, r->id);
+  r->env = jni_get_env();
+  r->cls = jni_find_class(WWW_CLASS);
+  r->header_cb = jni_find_native(WWW_CLASS, "headerCallback");
+  r->read_cb = jni_find_native(WWW_CLASS, "readCallback");
+  r->error_cb = jni_find_native(WWW_CLASS, "errorCallback");
+  r->done_cb = jni_find_native(WWW_CLASS, "doneCallback");
+  r->chunk = jni_new_array("[B", WWW_CHUNK, 1);
+
+  http_callbacks cb = {r, www_on_status, www_on_header, www_on_data};
+  char err[256] = "";
+  const char *method = r->body ? "POST" : "GET";
+  int code = http_request(method, r->url, r->headers, r->num_headers, r->body, r->body_len, &cb, err, sizeof(err));
+  if (code < 0) {
+    L_WARN("www: %s %s failed: %s", method, r->url, err);
+    if (r->error_cb)
+      r->error_cb(r->env, r->cls, r->id, jni_new_string(err));
+  } else if (code >= 400) {
+    // HttpURLConnection reports HTTP errors through WWW.error as well.
+    char msg[64];
+    snprintf(msg, sizeof(msg), "%d", code);
+    if (r->error_cb)
+      r->error_cb(r->env, r->cls, r->id, jni_new_string(msg));
+  }
+  if (r->done_cb)
+    r->done_cb(r->env, r->cls, r->id);
+
+  free(r->url);
+  free(r->body);
+  for (int i = 0; i < r->num_headers; i++) {
+    free((void *)r->headers[i].name);
+    free((void *)r->headers[i].value);
+  }
   free(r);
   return sceKernelExitDeleteThread(0);
 }
@@ -463,8 +584,23 @@ static int www_thread(SceSize args, void *argp) {
 static jvalue www_init(jobj *self, const jvalue *a) {
   www_request *r = calloc(1, sizeof(*r));
   r->id = a[0].i;
-  strncpy(r->url, jni_string_utf8(a[1].l), sizeof(r->url) - 1);
-  SceUID t = sceKernelCreateThread("www", www_thread, 0x10000100, 0x10000, 0, 0, NULL);
+  r->url = strdup(jni_string_utf8(a[1].l));
+  jobj *post = a[2].l;
+  if (post && post->magic == JOBJ_MAGIC && post->kind == JO_ARRAY) {
+    r->body_len = post->arr.len;
+    r->body = malloc(r->body_len ? r->body_len : 1);
+    memcpy(r->body, post->arr.data, r->body_len);
+  }
+  hash_map *m = a[3].l ? map_of(a[3].l) : NULL;
+  for (int i = 0; m && i < m->n && r->num_headers < MAP_MAX; i++) {
+    r->headers[r->num_headers].name = strdup(jni_string_utf8(m->keys[i]));
+    r->headers[r->num_headers].value = strdup(jni_string_utf8(m->values[i]));
+    r->num_headers++;
+  }
+  L_INFO("www: %s %s (%u bytes, %d headers)", r->body ? "POST" : "GET", r->url, (unsigned)r->body_len,
+         r->num_headers);
+  // mbedTLS handshakes need a roomy stack.
+  SceUID t = sceKernelCreateThread("www", www_thread, 0x10000100, 256 * 1024, 0, 0, NULL);
   sceKernelStartThread(t, sizeof(r), &r);
   return RET_VOID;
 }
@@ -551,6 +687,10 @@ void java_impl_init(void) {
   jni_register_method("java/util/Locale", "getDefault", NULL, locale_getDefault);
   jni_register_method("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", integer_parseInt);
   jni_register_method("com/unity3d/player/WWW", "<init>", NULL, www_init);
+  jni_register_method(NULL, "join", "()V", ret_void);  // WWW.join(): our thread needs no joining
+  jni_register_method("java/util/HashMap", "put", NULL, hashmap_put);
+  jni_register_method("java/util/HashMap", "get", NULL, hashmap_get);
+  jni_register_method("java/util/HashMap", "size", NULL, hashmap_size);
   jni_register_method("android/provider/Settings$Secure", "getString", NULL, secure_getString);
   jni_register_method("android/telephony/TelephonyManager", "getDeviceId", NULL, tel_getDeviceId);
 

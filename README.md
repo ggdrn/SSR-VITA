@@ -43,8 +43,10 @@ Requisitos no console:
    hookar `GC_stop_world`/`GC_start_world` no `libmono`.
 2. **NullReferenceException** do Mono depende de SIGSEGV. Implementado via exception handler do
    kubridge (`signal_bridge.c`), ainda sem validação em hardware.
-3. **Rede**: o jogo é online (servidor Revival). `WWW` do Unity 4 é Java (`HttpURLConnection`) e o Mono
-   usa sockets BSD. Ambos estão como "indisponível" nesta versão — próximo grande bloco.
+3. **Rede**: o jogo é online (servidor Revival, atrás do Cloudflare: só HTTPS, certificados ECDSA). Toda a
+   rede passa pelo `WWW` do Unity, emulado sobre um cliente HTTP/1.1 próprio + **mbedTLS 3.6**
+   (`third_party/mbedtls`, Apache-2.0), rodando inteiro no Vita — o SSL nativo do Vita não suporta
+   ECDSA. O relógio do Vita precisa estar com data/hora corretas (validade dos certificados).
 4. **Memória**: ~365 MB com `ATTRIBUTE2=12`; heap newlib de 220 MB + vitaGL.
 
 ## Mapa de hardware
@@ -62,6 +64,7 @@ Requisitos no console:
 | mmap/mprotect (JIT) | kubridge `MemReserve/Commit` RWX | `src/bridges/mem_bridge.c` |
 | Sinais | exception handlers do kubridge | `src/bridges/signal_bridge.c` |
 | SharedPreferences (PlayerPrefs) | arquivos em `files/shared_prefs/` | `src/jni/java_impl.c` |
+| `com.unity3d.player.WWW` (HTTP/HTTPS) | sockets `sceNet` + mbedTLS, raízes em `src/net/ca_roots.pem` | `src/net/http.c`, `src/jni/java_impl.c` |
 | Idioma (`Locale`) | idioma do sistema do Vita | `src/jni/java_impl.c` |
 | CPU/GPU | 444/222/222/166 MHz | `src/main.c` |
 

@@ -35,11 +35,22 @@ set(LOCAL_VITAGL "${CMAKE_SOURCE_DIR}/../vitaGL")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -O2 -g -mcpu=cortex-a9 -mfpu=neon -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable")
 
+# mbedTLS (third_party/mbedtls, 3.6 LTS) for HTTPS to the Revival servers.
+file(GLOB MBEDTLS_SOURCES ${CMAKE_SOURCE_DIR}/third_party/mbedtls/library/*.c)
+add_library(mbedtls_vita STATIC ${MBEDTLS_SOURCES})
+target_include_directories(mbedtls_vita PUBLIC
+  ${CMAKE_SOURCE_DIR}/third_party/mbedtls/include
+  ${CMAKE_SOURCE_DIR}/src/net)
+target_compile_definitions(mbedtls_vita PUBLIC MBEDTLS_USER_CONFIG_FILE="mbedtls_user_config.h")
+target_compile_options(mbedtls_vita PRIVATE -w)
+
 add_executable(${PROJECT_NAME}
   src/main.c
   src/unity_boot.c
   src/patches.c
   src/mono_probe.c
+  src/net/http.c
+  src/net/ca_roots.c
   src/util/log.c
   src/util/apk.c
   src/loader/so_util.c
@@ -76,6 +87,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME}
+  mbedtls_vita
+  SceNet_stub
+  SceNetCtl_stub
   ${LOCAL_VITAGL}/libvitaGL.a
   vitashark
   SceShaccCgExt

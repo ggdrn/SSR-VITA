@@ -144,6 +144,8 @@ static jobj *new_array(const char *cls, int len, int elem_size) {
   return o;
 }
 
+jobj *jni_new_array(const char *cls, int len, int elem_size) { return new_array(cls, len, elem_size); }
+
 void *jni_new_direct_buffer(void *addr, int64_t capacity) {
   jobj *o = obj_alloc(JO_BYTEBUFFER, "java/nio/ByteBuffer");
   o->buf.addr = addr;

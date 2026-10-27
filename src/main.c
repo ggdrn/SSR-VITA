@@ -9,6 +9,7 @@
 #include "loader/so_util.h"
 #include "util/apk.h"
 #include "util/log.h"
+#include "net/http.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -155,6 +156,7 @@ int main(void) {
   // the engine's code/data blocks must already be allocated by then.
   log_free_memory("before libraries");
   watchdog_start();
+  net_init();
   load_libraries();
   log_free_memory("after libraries");
   gl_bridge_init();
