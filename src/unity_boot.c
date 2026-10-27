@@ -85,6 +85,14 @@ int unity_run(void) {
     nativeFile(env, player, jni_new_string(fs_apk_android_path()));
   }
 
+  // UnityPlayer's constructor hands Unity the WWW class; without it the first
+  // WWW request dereferences a null constructor ID.
+  void (*initWWW)(void *, jobj *, jobj *) = native(UNITY_PLAYER, "nativeInitWWW");
+  if (initWWW) {
+    L_INFO("unity: nativeInitWWW()");
+    initWWW(env, player, jni_find_class("com/unity3d/player/WWW"));
+  }
+
   // 3. Surface + resume.
   const char *sig = jni_native_signature(UNITY_PLAYER, "nativeRecreateGfxState");
   void *recreate = native(UNITY_PLAYER, "nativeRecreateGfxState");

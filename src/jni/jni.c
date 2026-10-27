@@ -287,13 +287,18 @@ static jobj *AllocObject(ENV, jobj *c) { return jni_new_object(c ? c->cls : "jav
 
 static jobj *construct(jobj *c, jmethod *m, const jvalue *args) {
   jobj *o = jni_new_object(c ? c->cls : "java/lang/Object");
+  if (!m) {
+    L_WARN("jni: NewObject(%s) with a null constructor ID", c ? c->cls : "?");
+    return o;
+  }
   if (m->fn)
     m->fn(o, args);
   return o;
 }
 static jobj *NewObjectV(ENV, jobj *c, jmethod *m, va_list ap) {
   jvalue a[32];
-  read_args_v(m->sig, ap, a, 32);
+  if (m)
+    read_args_v(m->sig, ap, a, 32);
   return construct(c, m, a);
 }
 static jobj *NewObject(ENV, jobj *c, jmethod *m, ...) {

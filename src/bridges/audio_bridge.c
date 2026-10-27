@@ -118,6 +118,7 @@ typedef struct {
 
 #define BQ_MAX 16
 #define SL_GRAIN 512
+#define SL_PORT_RATE 48000
 
 typedef enum { OBJ_ENGINE, OBJ_MIX, OBJ_PLAYER } obj_type;
 
@@ -305,6 +306,11 @@ static int player_thread(SceSize args, void *argp) {
   int out_frames = 0;
   int last_vol = -1;
   const int in_frame_bytes = o->channels * (o->bits / 8);
+  // Linear resampling to the MAIN port's fixed 48 kHz: `phase` (16.16) is the
+  // output position between the previous and current input frame.
+  const uint32_t step = (uint32_t)(((uint64_t)o->rate << 16) / SL_PORT_RATE);
+  uint32_t phase = 0;
+  int16_t prev[2] = {0, 0};
 
   while (!o->quit) {
     if (o->play_state != SL_PLAYSTATE_PLAYING || o->bq_count == 0) {
@@ -323,12 +329,20 @@ static int player_thread(SceSize args, void *argp) {
     int frames = o->bq[o->bq_head].size / in_frame_bytes;
     for (int f = 0; f < frames; f++) {
       const int16_t *s = (const int16_t *)(buf + f * in_frame_bytes);
-      out[out_frames * 2] = s[0];
-      out[out_frames * 2 + 1] = o->channels > 1 ? s[1] : s[0];
-      if (++out_frames == SL_GRAIN) {
-        sceAudioOutOutput(o->port, out);
-        out_frames = 0;
+      int16_t cur[2] = {s[0], o->channels > 1 ? s[1] : s[0]};
+      while (phase < 0x10000) {
+        out[out_frames * 2] = prev[0] + (((cur[0] - prev[0]) * (int32_t)phase) >> 16);
+        out[out_frames * 2 + 1] = prev[1] + (((cur[1] - prev[1]) * (int32_t)phase) >> 16);
+        if (++out_frames == SL_GRAIN) {
+          if (o->port >= 0)
+            sceAudioOutOutput(o->port, out);
+          out_frames = 0;
+        }
+        phase += step;
       }
+      phase -= 0x10000;
+      prev[0] = cur[0];
+      prev[1] = cur[1];
     }
     o->bq_head = (o->bq_head + 1) % BQ_MAX;
     o->bq_play_index++;
@@ -354,10 +368,11 @@ static SLresult engine_CreateAudioPlayer(void *self, void *out, SLDataSource *sr
   o->vol_itf = &vol_vtbl;
   o->type = OBJ_PLAYER;
   o->channels = fmt->numChannels;
-  o->rate = vita_rate(fmt->samplesPerSec / 1000);
+  o->rate = fmt->samplesPerSec / 1000;  // source rate (milliHz in OpenSL)
   o->bits = 16;
   o->play_state = SL_PLAYSTATE_STOPPED;
-  o->port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, SL_GRAIN, o->rate, SCE_AUDIO_OUT_MODE_STEREO);
+  // MAIN ports only run at 48 kHz; player_thread resamples.
+  o->port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, SL_GRAIN, SL_PORT_RATE, SCE_AUDIO_OUT_MODE_STEREO);
   if (o->port < 0)
     L_ERROR("opensl: sceAudioOutOpenPort failed 0x%08X", o->port);
   o->sema = sceKernelCreateSema("sl_player", 0, 0, 1024, NULL);
@@ -422,7 +437,7 @@ static int fmod_thread(SceSize args, void *argp) {
     block = getInfo(env, NULL, FMOD_INFO_DSPBUFFERLENGTH);
     if (rate > 0 && block > 0 && getInfo(env, NULL, FMOD_INFO_MIXERRUNNING) > 0)
       break;
-    if (waited % 500 == 499)
+    if (waited % 6000 == 5999)  // once a minute
       L_INFO("fmod: still waiting for the mixer (rate %d, block %d)", rate, block);
     sceKernelDelayThread(10000);
   }

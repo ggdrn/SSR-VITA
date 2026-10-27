@@ -14,6 +14,7 @@
 #include <psp2/apputil.h>
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/system_param.h>
 
 void audio_fmod_start(void);
@@ -368,7 +369,7 @@ static jvalue audio_getProperty(jobj *self, const jvalue *a) {
     return RET_STR("48000");
   if (strstr(k, "FRAMES_PER_BUFFER"))
     return RET_STR("1024");
-  return RET_STR("");
+  return RET_OBJ(NULL);  // like System.getProperty: unknown keys are null
 }
 
 static jvalue audio_getSampleRate(jobj *self, const jvalue *a) { return RET_INT(48000); }
@@ -434,6 +435,46 @@ static jvalue string_equals(jobj *self, const jvalue *a) {
   return RET_BOOL(strcmp(jni_string_utf8(self), jni_string_utf8(a[0].l)) == 0);
 }
 
+// --- com.unity3d.player.WWW ---------------------------------------------------
+// Unity's HTTP goes through this Java class: the constructor starts a thread
+// that reports back through static natives. There is no HTTP stack yet, so
+// every request fails with an error the game can handle.
+
+typedef struct {
+  int id;
+  char url[512];
+} www_request;
+
+static int www_thread(SceSize args, void *argp) {
+  www_request *r = *(www_request **)argp;
+  void *env = jni_get_env();
+  jobj *cls = jni_find_class("com/unity3d/player/WWW");
+  void (*error_cb)(void *, jobj *, int, jobj *) = jni_find_native("com/unity3d/player/WWW", "errorCallback");
+  void (*done_cb)(void *, jobj *, int) = jni_find_native("com/unity3d/player/WWW", "doneCallback");
+  L_WARN("www: request %d to %s failed (no HTTP support yet)", r->id, r->url);
+  if (error_cb)
+    error_cb(env, cls, r->id, jni_new_string("Network is not available"));
+  if (done_cb)
+    done_cb(env, cls, r->id);
+  free(r);
+  return sceKernelExitDeleteThread(0);
+}
+
+static jvalue www_init(jobj *self, const jvalue *a) {
+  www_request *r = calloc(1, sizeof(*r));
+  r->id = a[0].i;
+  strncpy(r->url, jni_string_utf8(a[1].l), sizeof(r->url) - 1);
+  SceUID t = sceKernelCreateThread("www", www_thread, 0x10000100, 0x10000, 0, 0, NULL);
+  sceKernelStartThread(t, sizeof(r), &r);
+  return RET_VOID;
+}
+
+// --- java.lang / java.util helpers --------------------------------------------
+
+static jvalue integer_parseInt(jobj *self, const jvalue *a) { return RET_INT(atoi(jni_string_utf8(a[0].l))); }
+
+static jvalue locale_getDefault(jobj *self, const jvalue *a) { return RET_OBJ(jni_new_object("java/util/Locale")); }
+
 static jvalue get_static_activity(jobj *self, const jvalue *a) {
   return RET_OBJ(jni_new_object("com/unity3d/player/UnityPlayerNativeActivity"));
 }
@@ -494,9 +535,14 @@ void java_impl_init(void) {
   jni_register_field_int("android/os/Build$VERSION", "SDK_INT", 19);
 
   // Locale / ids
-  jni_register_method("java/util/Locale", "getLanguage", NULL, locale_getLanguage);
-  jni_register_method("java/util/Locale", "getCountry", NULL, locale_getCountry);
+  // AndroidJavaObject calls these through java/lang/Object, so match any class.
+  jni_register_method(NULL, "getLanguage", NULL, locale_getLanguage);
+  jni_register_method(NULL, "getCountry", NULL, locale_getCountry);
   jni_register_method("java/util/Locale", "toString", NULL, locale_toString);
+  jni_register_method(NULL, "getDefault", "()Ljava/util/Locale;", locale_getDefault);
+  jni_register_method("java/util/Locale", "getDefault", NULL, locale_getDefault);
+  jni_register_method("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", integer_parseInt);
+  jni_register_method("com/unity3d/player/WWW", "<init>", NULL, www_init);
   jni_register_method("android/provider/Settings$Secure", "getString", NULL, secure_getString);
   jni_register_method("android/telephony/TelephonyManager", "getDeviceId", NULL, tel_getDeviceId);
 
