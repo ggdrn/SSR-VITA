@@ -9,6 +9,10 @@
 // arguments or return values must carry this attribute.
 #define SOFTFP __attribute__((pcs("aapcs")))
 
+// libc_bridge.c
+// Fills `out` from the Vita's hardware RNG (any length).
+void vita_random(void *out, size_t len);
+
 // fs_bridge.c
 // Maps an Android path to its ux0 location. Returns `path` untouched when no
 // mapping applies, otherwise writes into `out`.

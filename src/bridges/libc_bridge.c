@@ -21,6 +21,7 @@
 
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/rng.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/rtc.h>
 
@@ -254,6 +255,47 @@ static int oflags_from_bionic(int f) {
   return r;
 }
 
+// --- /dev/urandom ------------------------------------------------------------
+// Mono's RNG (Guid.NewGuid, RNGCryptoServiceProvider) reads /dev/urandom and
+// gets a null handle without it. Opening either random device returns a real
+// newlib fd (so close/fcntl work) whose reads come from the Vita's RNG.
+
+#define MAX_RANDOM_FDS 16
+static int random_fds[MAX_RANDOM_FDS];
+static int random_fd_count;
+
+void vita_random(void *out, size_t len) {
+  uint8_t *p = out;
+  while (len) {
+    size_t n = len > 64 ? 64 : len;  // sceKernelGetRandomNumber's limit
+    sceKernelGetRandomNumber(p, n);
+    p += n;
+    len -= n;
+  }
+}
+
+static int is_random_device(const char *path) {
+  return path && (!strcmp(path, "/dev/urandom") || !strcmp(path, "/dev/random"));
+}
+
+static int random_fd_slot(int fd) {
+  for (int i = 0; i < random_fd_count; i++)
+    if (random_fds[i] == fd)
+      return i;
+  return -1;
+}
+
+static int open_random_device(void) {
+  int fd = open("ux0:", O_RDONLY);
+  if (fd < 0) {
+    SET_ERRNO();
+    return -1;
+  }
+  if (random_fd_count < MAX_RANDOM_FDS)
+    random_fds[random_fd_count++] = fd;
+  return fd;
+}
+
 int open_bridge(const char *path, int flags, ...) {
   char buf[512];
   int mode = 0666;
@@ -263,6 +305,8 @@ int open_bridge(const char *path, int flags, ...) {
     mode = va_arg(ap, int);
     va_end(ap);
   }
+  if (is_random_device(path))
+    return open_random_device();
   const char *p = fs_translate(path, buf, sizeof(buf));
   if (flags & B_O_DIRECTORY) {
     // newlib can't open directories as fds; fake a handle only if it exists.
@@ -294,9 +338,18 @@ int ioctl_bridge(int fd, int req, ...) {
   return -1;
 }
 
-int close_bridge(int fd) { return RET_ERRNO(close(fd)); }
+int close_bridge(int fd) {
+  int i = random_fd_slot(fd);
+  if (i >= 0)
+    random_fds[i] = random_fds[--random_fd_count];
+  return RET_ERRNO(close(fd));
+}
 ssize_t read_bridge(int fd, void *b, size_t n) {
   signal_poll();
+  if (random_fd_slot(fd) >= 0) {
+    vita_random(b, n);
+    return n;
+  }
   return RET_ERRNO(read(fd, b, n));
 }
 ssize_t write_bridge(int fd, const void *b, size_t n) {
@@ -369,6 +422,11 @@ static void stat_to_bionic(const struct stat *s, bionic_stat *b) {
 }
 
 int stat_bridge(const char *path, bionic_stat *out) {
+  if (is_random_device(path)) {
+    memset(out, 0, sizeof(*out));
+    out->st_mode = S_IFCHR | 0666;
+    return 0;
+  }
   char buf[512];
   const char *p = fs_translate(path, buf, sizeof(buf));
   struct stat st;
@@ -412,6 +470,8 @@ int mkdir_bridge(const char *path, int mode) {
 }
 
 int access_bridge(const char *path, int mode) {
+  if (is_random_device(path))
+    return 0;
   char buf[512];
   const char *p = fs_translate(path, buf, sizeof(buf));
   struct stat st;

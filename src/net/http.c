@@ -5,6 +5,7 @@
 
 #define _GNU_SOURCE  // strcasestr
 #include "http.h"
+#include "../bridges/bridges.h"
 #include "../util/log.h"
 
 #include <netdb.h>
@@ -41,7 +42,7 @@ extern const char ca_roots_pem[];
 // --- platform hooks mbedTLS asks for (see mbedtls_user_config.h) -----------
 
 int mbedtls_hardware_poll(void *data, unsigned char *out, size_t len, size_t *olen) {
-  sceKernelGetRandomNumber(out, len);
+  vita_random(out, len);  // mbedTLS asks for up to 128 bytes, the RNG gives 64 per call
   *olen = len;
   return 0;
 }
