@@ -239,7 +239,7 @@ void glGetTexParameteriv_bridge(GLenum target, GLenum pname, GLint *params) {
 static char *shader_sources[MAX_SHADERS];
 static GLuint program_shaders[1025][2];
 static unsigned draws_this_frame, frames_seen;
-static int link_failures;
+static int link_failures, links_ok;
 
 void glShaderSource_bridge(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
   if (shader < MAX_SHADERS) {
@@ -291,6 +291,8 @@ static void log_source(const char *what, GLuint shader) {
 static void check_link(GLuint prog) {
   GLint ok = 0;
   glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+  if (ok)
+    links_ok++;
   if (ok || link_failures >= 6)
     return;
   link_failures++;
@@ -379,7 +381,8 @@ static void gl_frame_stats(void) {
   frames_seen++;
   if (frames_seen == 1 || frames_seen % 600 == 0) {
     GLenum err = glGetError();
-    L_INFO("gl: frame %u: %u draw calls, glGetError 0x%X", frames_seen, draws_this_frame, err);
+    L_INFO("gl: frame %u: %u draw calls, glGetError 0x%X, programs linked %d (failed %d)", frames_seen,
+           draws_this_frame, err, links_ok, link_failures);
   }
   draws_this_frame = 0;
 }

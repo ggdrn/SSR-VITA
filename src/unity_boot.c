@@ -19,6 +19,7 @@
 #define NATIVE_LOADER "com/unity3d/player/NativeLoader"
 
 void audio_fmod_start(void);
+void mono_probe(void);
 void audio_fmod_stop(void);
 
 static void *env;
@@ -157,6 +158,8 @@ int unity_run(void) {
     watchdog_frames = ++frame;
     if (frame == 1 || frame % 600 == 0)
       L_INFO("unity: frame %u", frame);
+    if (frame % 600 == 300)
+      mono_probe();  // what the C# side thinks is on screen
   }
   call_void("nativeDone");
   // Let the audio thread leave its wait loop before the process goes away.

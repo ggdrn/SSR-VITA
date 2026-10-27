@@ -39,6 +39,7 @@ add_executable(${PROJECT_NAME}
   src/main.c
   src/unity_boot.c
   src/patches.c
+  src/mono_probe.c
   src/util/log.c
   src/util/apk.c
   src/loader/so_util.c
