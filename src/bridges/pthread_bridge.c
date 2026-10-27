@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 
+#include <psp2/kernel/cpu.h>
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
@@ -168,35 +169,35 @@ int pthread_cond_destroy_bridge(uint32_t *bc) {
   return 0;
 }
 
-// Waits in slices until signalled or `target` (CLOCK_REALTIME, NULL = never).
-// A queued signal is handled with the mutex released and reported as a
-// spurious wakeup, which callers must already tolerate.
+// Waits one slice (or until `target`, CLOCK_REALTIME, if sooner) and returns.
+// An expired slice is reported as a spurious wakeup (allowed by POSIX) so the
+// caller rechecks its predicate: a wakeup lost by pthread-embedded's timed
+// wait, or signalled outside the mutex, then costs one slice instead of
+// hanging the thread forever. Queued signals run with the mutex released.
 static int cond_wait_until(uint32_t *bc, uint32_t *bm, const struct timespec *target) {
   pthread_cond_t *c = cond_get(bc);
   pthread_mutex_t *m = mutex_get(bm);
-  for (;;) {
-    struct timespec slice;
-    deadline_after(&slice, SLICE_NS);
-    if (target && ts_before(target, &slice))
-      slice = *target;
-    int r = pthread_cond_timedwait(c, m, &slice);
-    if (r == 0)
-      return 0;
-    if (r != ETIMEDOUT)
-      return r;
-    if (signal_pending_self()) {
-      pthread_mutex_unlock(m);
-      signal_poll();
-      pthread_mutex_lock(m);
-      return 0;
-    }
-    if (target) {
-      struct timespec now;
-      clock_gettime(CLOCK_REALTIME, &now);
-      if (!ts_before(&now, target))
-        return B_ETIMEDOUT;
-    }
+  struct timespec slice;
+  deadline_after(&slice, SLICE_NS);
+  if (target && ts_before(target, &slice))
+    slice = *target;
+  int r = pthread_cond_timedwait(c, m, &slice);
+  if (r == 0)
+    return 0;
+  if (r != ETIMEDOUT)
+    return r;
+  if (signal_pending_self()) {
+    pthread_mutex_unlock(m);
+    signal_poll();
+    pthread_mutex_lock(m);
   }
+  if (target) {
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    if (!ts_before(&now, target))
+      return B_ETIMEDOUT;
+  }
+  return 0;
 }
 
 int pthread_cond_wait_bridge(uint32_t *bc, uint32_t *bm) {
@@ -274,6 +275,9 @@ static thread_slot *slot_find(pthread_t t) {
 static void *thread_trampoline(void *arg) {
   thread_slot *s = arg;
   s->uid = sceKernelGetThreadId();
+  // Let game threads run on any user core, so one busy-waiting thread can't
+  // starve the thread it waits for.
+  sceKernelChangeThreadCpuAffinityMask(s->uid, SCE_KERNEL_CPU_MASK_USER_ALL);
   return s->func(s->arg);
 }
 
