@@ -98,6 +98,9 @@ static MonoObject *find_all(const char *cls) {
   return call("Object", "FindObjectsOfType", NULL, type_arg, 1);
 }
 
+// Boxed structs (Vector3, Rect, Bounds) are float fields after the header.
+static float boxed_f(MonoObject *o, int i) { return o ? ((float *)((char *)o + 8))[i] : -9999.0f; }
+
 static int as_bool(MonoObject *o) { return o ? *(uint8_t *)((char *)o + 8) : -1; }
 
 // One-off listing of the scene: every GameObject (active flags, layer) and
@@ -126,6 +129,14 @@ static void dump_scene(void) {
     L_INFO("probe:   renderer %s on '%s' enabled %d visible %d layer %d",
            api.class_get_name(api.object_get_class(r)), name, as_bool(call("Renderer", "get_enabled", r, NULL, 0)),
            as_bool(call("Renderer", "get_isVisible", r, NULL, 0)), g ? unbox_int(call("GameObject", "get_layer", g, NULL, 0)) : -1);
+    MonoObject *b = call("Renderer", "get_bounds", r, NULL, 0);  // center xyz, extents xyz
+    MonoObject *t = g ? call("GameObject", "get_transform", g, NULL, 0) : NULL;
+    MonoObject *pos = t ? call("Transform", "get_position", t, NULL, 0) : NULL;
+    MonoObject *scl = t ? call("Transform", "get_lossyScale", t, NULL, 0) : NULL;
+    L_INFO("probe:     bounds center (%.3f, %.3f, %.3f) extents (%.3f, %.3f, %.3f) pos (%.3f, %.3f, %.3f) scale "
+           "(%.5f, %.5f, %.5f)",
+           boxed_f(b, 0), boxed_f(b, 1), boxed_f(b, 2), boxed_f(b, 3), boxed_f(b, 4), boxed_f(b, 5), boxed_f(pos, 0),
+           boxed_f(pos, 1), boxed_f(pos, 2), boxed_f(scl, 0), boxed_f(scl, 1), boxed_f(scl, 2));
   }
 }
 
@@ -149,8 +160,9 @@ void mono_probe(void) {
 
   MonoObject *cams = call("Camera", "get_allCameras", NULL, NULL, 0);
   int ncams = array_length(cams);
-  L_INFO("probe: level '%s' loading %d timeScale %.2f gameObjects %d cameras %d", level, loading, scale, objects,
-         ncams);
+  L_INFO("probe: level '%s' loading %d timeScale %.2f gameObjects %d cameras %d screen %dx%d", level, loading,
+         scale, objects, ncams, unbox_int(call("Screen", "get_width", NULL, NULL, 0)),
+         unbox_int(call("Screen", "get_height", NULL, NULL, 0)));
   static int dumps;
   if (dumps < 2 && objects > 0) {  // once early, once after things settle
     static int calls;
@@ -169,5 +181,17 @@ void mono_probe(void) {
     int target = call("Camera", "get_targetTexture", cam, NULL, 0) != NULL;
     L_INFO("probe:   camera '%s' cullingMask 0x%X clearFlags %d depth %.1f renderTexture %d", name, mask, clear,
            depth, target);
+    MonoObject *t = call("Component", "get_transform", cam, NULL, 0);
+    MonoObject *pos = t ? call("Transform", "get_position", t, NULL, 0) : NULL;
+    MonoObject *px = call("Camera", "get_pixelRect", cam, NULL, 0);
+    L_INFO("probe:     enabled %d ortho %d size %.3f near %.3f far %.3f aspect %.3f fov %.1f pixelRect (%.0f,%.0f %.0fx%.0f) "
+           "pos (%.3f, %.3f, %.3f)",
+           as_bool(call("Behaviour", "get_enabled", cam, NULL, 0)), as_bool(call("Camera", "get_orthographic", cam, NULL, 0)),
+           unbox_float(call("Camera", "get_orthographicSize", cam, NULL, 0)),
+           unbox_float(call("Camera", "get_nearClipPlane", cam, NULL, 0)),
+           unbox_float(call("Camera", "get_farClipPlane", cam, NULL, 0)),
+           unbox_float(call("Camera", "get_aspect", cam, NULL, 0)), unbox_float(call("Camera", "get_fieldOfView", cam, NULL, 0)),
+           boxed_f(px, 0), boxed_f(px, 1), boxed_f(px, 2), boxed_f(px, 3), boxed_f(pos, 0), boxed_f(pos, 1),
+           boxed_f(pos, 2));
   }
 }
