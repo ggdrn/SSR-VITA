@@ -312,20 +312,57 @@ static int seen_format(uint32_t key) {
   return 0;
 }
 
+// `before` is an error left by an earlier call (e.g. an unsupported
+// glTexParameter); only `after` belongs to the upload itself. Each format is
+// logged once, plus once more the first time its upload itself fails.
 void glTexImage2D_bridge(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum fmt,
                          GLenum type, const void *data) {
+  GLenum before = glGetError();
   glTexImage2D(target, level, ifmt, w, h, border, fmt, type, data);
-  GLenum err = glGetError();
-  if (!seen_format(((uint32_t)fmt << 16) ^ type ^ ((uint32_t)ifmt << 8)) || err)
-    L_INFO("gl: glTexImage2D ifmt 0x%X fmt 0x%X type 0x%X %dx%d -> error 0x%X", ifmt, fmt, type, w, h, err);
+  GLenum after = glGetError();
+  uint32_t key = ((uint32_t)fmt << 16) ^ type ^ ((uint32_t)ifmt << 8);
+  if (!seen_format(key) || (after && !seen_format(key | 0x40000000)))
+    L_INFO("gl: glTexImage2D ifmt 0x%X fmt 0x%X type 0x%X %dx%d -> error 0x%X (pending before: 0x%X)", ifmt, fmt,
+           type, w, h, after, before);
 }
 
 void glCompressedTexImage2D_bridge(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
                                    GLsizei size, const void *data) {
+  GLenum before = glGetError();
   glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
+  GLenum after = glGetError();
+  uint32_t key = 0x80000000 | ifmt;
+  if (!seen_format(key) || (after && !seen_format(key | 0x40000000)))
+    L_INFO("gl: glCompressedTexImage2D ifmt 0x%X %dx%d (%d bytes) -> error 0x%X (pending before: 0x%X)", ifmt, w,
+           h, size, after, before);
+}
+
+// Reports the first GL_INVALID_ENUM-style error per (call, pname): these are
+// the likely source of the errors pending before texture uploads.
+static void check_param(const char *call, GLenum pname, GLint value) {
   GLenum err = glGetError();
-  if (!seen_format(0x80000000 | ifmt) || err)
-    L_INFO("gl: glCompressedTexImage2D ifmt 0x%X %dx%d (%d bytes) -> error 0x%X", ifmt, w, h, size, err);
+  if (err && !seen_format(0x20000000 ^ ((uint32_t)pname << 4) ^ (uint32_t)call[2]))
+    L_INFO("gl: %s(0x%X, 0x%X) -> error 0x%X", call, pname, value, err);
+}
+
+void glTexParameteri_bridge(GLenum target, GLenum pname, GLint param) {
+  glTexParameteri(target, pname, param);
+  check_param("glTexParameteri", pname, param);
+}
+
+void glPixelStorei_bridge(GLenum pname, GLint param) {
+  glPixelStorei(pname, param);
+  check_param("glPixelStorei", pname, param);
+}
+
+void glEnable_bridge(GLenum cap) {
+  glEnable(cap);
+  check_param("glEnable", cap, 0);
+}
+
+void glDisable_bridge(GLenum cap) {
+  glDisable(cap);
+  check_param("glDisable", cap, 0);
 }
 
 void glDrawElements_bridge(GLenum mode, GLsizei count, GLenum type, const void *indices) {

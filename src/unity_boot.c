@@ -59,6 +59,25 @@ void unity_resize(void) {
   }
 }
 
+// What Android's surfaceChanged does: hand Unity the surface again, then the
+// size. A resize alone (triggerResizeCall) makes Unity release its EGL
+// surface and wait for a new one; without it, it stops rendering the scene.
+static void unity_surface_changed(void) {
+  static jobj *surface;
+  if (!surface)
+    surface = jni_new_object("android/view/Surface");
+  const char *sig = jni_native_signature(UNITY_PLAYER, "nativeRecreateGfxState");
+  void *recreate = native(UNITY_PLAYER, "nativeRecreateGfxState");
+  if (recreate) {
+    L_INFO("unity: nativeRecreateGfxState%s", sig ? sig : "");
+    if (sig && strncmp(sig, "(I", 2) == 0)
+      ((void (*)(void *, jobj *, int, jobj *))recreate)(env, player, 0, surface);
+    else
+      ((void (*)(void *, jobj *, jobj *))recreate)(env, player, surface);
+  }
+  unity_resize();
+}
+
 static int jni_onload(const char *lib) {
   so_module *m = so_find_module(lib);
   int (*onload)(void *, void *) = m ? (void *)so_symbol(m, "JNI_OnLoad") : NULL;
@@ -106,17 +125,7 @@ int unity_run(void) {
   }
 
   // 3. Surface + resume.
-  const char *sig = jni_native_signature(UNITY_PLAYER, "nativeRecreateGfxState");
-  void *recreate = native(UNITY_PLAYER, "nativeRecreateGfxState");
-  if (recreate) {
-    jobj *surface = jni_new_object("android/view/Surface");
-    L_INFO("unity: nativeRecreateGfxState%s", sig ? sig : "");
-    if (sig && strncmp(sig, "(I", 2) == 0)
-      ((void (*)(void *, jobj *, int, jobj *))recreate)(env, player, 0, surface);
-    else
-      ((void (*)(void *, jobj *, jobj *))recreate)(env, player, surface);
-  }
-  unity_resize();
+  unity_surface_changed();
   call_void("nativeResume");
   call_bool_arg("nativeFocusChanged", 1);
 
@@ -139,7 +148,7 @@ int unity_run(void) {
     input_poll();
     if (unity_resize_requested) {
       unity_resize_requested = 0;
-      unity_resize();
+      unity_surface_changed();
     }
     if (!render(env, player)) {
       L_INFO("unity: nativeRender returned false after %u frames", frame);

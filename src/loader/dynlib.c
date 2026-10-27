@@ -262,12 +262,12 @@ extern void glDeleteShader(void);
 extern void glDeleteTextures(void);
 extern void glDepthFunc(void);
 extern void glDepthMask(void);
-extern void glDisable(void);
 extern void glDisableVertexAttribArray(void);
+extern void glDisable_bridge(void);
 extern void glDrawArrays_bridge(void);
 extern void glDrawElements_bridge(void);
-extern void glEnable(void);
 extern void glEnableVertexAttribArray(void);
+extern void glEnable_bridge(void);
 extern void glFinish(void);
 extern void glFlush(void);
 extern void glFramebufferRenderbuffer(void);
@@ -294,7 +294,7 @@ extern void glGetUniformLocation_bridge(void);
 extern void glGetVertexAttribPointerv(void);
 extern void glGetVertexAttribiv_bridge(void);
 extern void glLinkProgram_bridge(void);
-extern void glPixelStorei(void);
+extern void glPixelStorei_bridge(void);
 extern void glPolygonOffset_sfp(void);
 extern void glReadPixels(void);
 extern void glRenderbufferStorage(void);
@@ -307,7 +307,7 @@ extern void glStencilOp(void);
 extern void glStencilOpSeparate(void);
 extern void glTexImage2D_bridge(void);
 extern void glTexParameterf_sfp(void);
-extern void glTexParameteri(void);
+extern void glTexParameteri_bridge(void);
 extern void glTexSubImage2D(void);
 extern void glUniform1fv_bridge(void);
 extern void glUniform1i_bridge(void);
@@ -831,11 +831,11 @@ const so_default_dynlib default_dynlib[] = {
   {"glDeleteTextures", (uintptr_t)&glDeleteTextures},
   {"glDepthFunc", (uintptr_t)&glDepthFunc},
   {"glDepthMask", (uintptr_t)&glDepthMask},
-  {"glDisable", (uintptr_t)&glDisable},
+  {"glDisable", (uintptr_t)&glDisable_bridge},
   {"glDisableVertexAttribArray", (uintptr_t)&glDisableVertexAttribArray},
   {"glDrawArrays", (uintptr_t)&glDrawArrays_bridge},
   {"glDrawElements", (uintptr_t)&glDrawElements_bridge},
-  {"glEnable", (uintptr_t)&glEnable},
+  {"glEnable", (uintptr_t)&glEnable_bridge},
   {"glEnableVertexAttribArray", (uintptr_t)&glEnableVertexAttribArray},
   {"glFinish", (uintptr_t)&glFinish},
   {"glFlush", (uintptr_t)&glFlush},
@@ -863,7 +863,7 @@ const so_default_dynlib default_dynlib[] = {
   {"glGetVertexAttribPointerv", (uintptr_t)&glGetVertexAttribPointerv},
   {"glGetVertexAttribiv", (uintptr_t)&glGetVertexAttribiv_bridge},
   {"glLinkProgram", (uintptr_t)&glLinkProgram_bridge},
-  {"glPixelStorei", (uintptr_t)&glPixelStorei},
+  {"glPixelStorei", (uintptr_t)&glPixelStorei_bridge},
   {"glPolygonOffset", (uintptr_t)&glPolygonOffset_sfp},
   {"glReadPixels", (uintptr_t)&glReadPixels},
   {"glRenderbufferStorage", (uintptr_t)&glRenderbufferStorage},
@@ -876,7 +876,7 @@ const so_default_dynlib default_dynlib[] = {
   {"glStencilOpSeparate", (uintptr_t)&glStencilOpSeparate},
   {"glTexImage2D", (uintptr_t)&glTexImage2D_bridge},
   {"glTexParameterf", (uintptr_t)&glTexParameterf_sfp},
-  {"glTexParameteri", (uintptr_t)&glTexParameteri},
+  {"glTexParameteri", (uintptr_t)&glTexParameteri_bridge},
   {"glTexSubImage2D", (uintptr_t)&glTexSubImage2D},
   {"glUniform1fv", (uintptr_t)&glUniform1fv_bridge},
   {"glUniform1i", (uintptr_t)&glUniform1i_bridge},
