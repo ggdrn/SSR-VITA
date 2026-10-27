@@ -93,7 +93,9 @@ int pthread_mutex_destroy_bridge(uint32_t *bm) {
 // Blocking waits run in short slices so a thread parked here still answers
 // signals queued by pthread_kill() (see signal_bridge.c). Without this, Mono's
 // GC waits forever for threads blocked on its allocation lock.
-#define SLICE_NS (5 * 1000 * 1000)
+// 20 ms: short enough for GC stop-the-world, long enough not to burn CPU
+// with hundreds of wakeups per second across idle threads.
+#define SLICE_NS (20 * 1000 * 1000)
 
 static void deadline_after(struct timespec *ts, int64_t ns) {
   clock_gettime(CLOCK_REALTIME, ts);

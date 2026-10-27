@@ -20,6 +20,8 @@ uintptr_t dynlib_lookup(const char *name);
 #define B_PROT_READ 1
 #define B_PROT_WRITE 2
 #define B_PROT_EXEC 4
+#define B_PROT_NONE 0
+#define B_MAP_FIXED 0x10
 #define B_MAP_ANONYMOUS 0x20
 #define B_MAP_FAILED ((void *)-1)
 
@@ -80,6 +82,20 @@ void *mmap_bridge(void *addr, size_t len, int prot, int flags, int fd, off_t off
   void *p;
   SceUID block = -1;
   size_t alen = ALIGN_UP(len, 0x1000);
+
+  // MAP_FIXED over memory we already handed out: Boehm GC "unmaps" free
+  // heap blocks with mmap(PROT_NONE, MAP_FIXED) and remaps them later with
+  // PROT_READ|PROT_WRITE, expecting the same address (it aborts otherwise).
+  // The memory stays ours; a remap must read back as zeroes.
+  if ((flags & B_MAP_FIXED) && addr) {
+    mapping *m = map_find((uintptr_t)addr);
+    if (m && (uintptr_t)addr + len <= m->addr + m->len) {
+      if (prot != B_PROT_NONE)
+        memset(addr, 0, len);
+      return addr;
+    }
+    L_WARN("mmap: MAP_FIXED at %p+0x%X outside known mappings", addr, len);
+  }
 
   if (prot & B_PROT_EXEC) {
     p = exec_alloc(alen, &block);

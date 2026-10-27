@@ -158,8 +158,10 @@ int unity_run(void) {
     watchdog_frames = ++frame;
     if (frame == 1 || frame % 600 == 0)
       L_INFO("unity: frame %u", frame);
-    if (frame % 600 == 300)
-      mono_probe();  // what the C# side thinks is on screen
+    // What the C# side thinks is on screen. It walks the whole scene through
+    // Mono, so it runs twice early and then about once a minute.
+    if (frame == 300 || frame == 900 || frame % 3600 == 300)
+      mono_probe();
   }
   call_void("nativeDone");
   // Let the audio thread leave its wait loop before the process goes away.

@@ -3,9 +3,14 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <psp2/types.h>
 
 // Brings up the Vita network stack and the TLS context (CA roots, RNG).
 int net_init(void);
+
+// Starts a background network thread, preferring the Vita's 4th (system)
+// core so TLS work doesn't compete with Unity's threads.
+int net_start_thread(const char *name, int (*entry)(SceSize, void *), SceSize args, void *argp);
 
 typedef struct {
   void *user;

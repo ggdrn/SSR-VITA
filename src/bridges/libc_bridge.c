@@ -568,7 +568,7 @@ time_t time_bridge(time_t *t) {
 // Sleeps in slices so queued signals still get handled (see signal_bridge.c).
 static void sleep_us(uint64_t us) {
   do {
-    uint64_t slice = us > 5000 ? 5000 : us;
+    uint64_t slice = us > 20000 ? 20000 : us;
     sceKernelDelayThreadCB(slice);
     us -= slice;
     signal_poll();

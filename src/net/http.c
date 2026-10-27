@@ -17,7 +17,9 @@
 #include <unistd.h>
 
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/kernel/rng.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
@@ -53,6 +55,8 @@ static mbedtls_ctr_drbg_context drbg;
 static mbedtls_x509_crt ca_chain;
 static mbedtls_ssl_config tls_conf;
 static int tls_ready;
+static SceKernelLwMutexWork pool_lock;  // keep-alive pool, see below
+static int pool_ready;
 
 static void tls_error(int ret, const char *what, char *err, size_t err_size) {
   char msg[128];
@@ -78,6 +82,8 @@ int net_init(void) {
   else
     L_WARN("net: Wi-Fi not connected (state %d); online features will fail", state);
 
+  sceKernelCreateLwMutex(&pool_lock, "http_pool", 0, 0, NULL);
+  pool_ready = 1;
   psa_crypto_init();
   mbedtls_entropy_init(&entropy);
   mbedtls_ctr_drbg_init(&drbg);
@@ -107,9 +113,11 @@ int net_init(void) {
 
 // --- connections ------------------------------------------------------------
 
-typedef struct {
+typedef struct conn_s {
   int fd;
   int tls;
+  char host[256];
+  int port;
   mbedtls_ssl_context ssl;
   uint8_t buf[8192];
   size_t pos, len;
@@ -128,6 +136,8 @@ static int sock_recv(void *ctx, unsigned char *buf, size_t len) {
 static int conn_open(conn *c, const char *host, int port, int tls, char *err, size_t err_size) {
   memset(c, 0, sizeof(*c));
   c->fd = -1;
+  strncpy(c->host, host, sizeof(c->host) - 1);
+  c->port = port;
   char port_str[8];
   snprintf(port_str, sizeof(port_str), "%d", port);
   struct addrinfo hints, *res = NULL;
@@ -239,6 +249,69 @@ static int read_line(conn *c, char *line, size_t size) {
   return n;
 }
 
+// --- threads -------------------------------------------------------------------
+
+int net_start_thread(const char *name, int (*entry)(SceSize, void *), SceSize args, void *argp) {
+  static int core_mask = SCE_KERNEL_CPU_MASK_SYSTEM | SCE_KERNEL_CPU_MASK_USER_2;
+  SceUID t = sceKernelCreateThread(name, entry, 0x10000100 + 10, 256 * 1024, 0, core_mask, NULL);
+  if (t < 0 && core_mask != SCE_KERNEL_CPU_MASK_USER_ALL) {
+    L_WARN("net: 4th core not available to this app (0x%08X); using the user cores", t);
+    core_mask = SCE_KERNEL_CPU_MASK_USER_ALL;
+    t = sceKernelCreateThread(name, entry, 0x10000100 + 10, 256 * 1024, 0, core_mask, NULL);
+  } else if (t >= 0) {
+    static int logged;
+    if (!logged++)
+      L_INFO("net: network threads run on cores mask 0x%X", core_mask);
+  }
+  if (t < 0)
+    return t;
+  return sceKernelStartThread(t, args, argp);
+}
+
+// --- keep-alive pool ----------------------------------------------------------
+// Every asset used to cost a full TLS handshake (ECDHE + ECDSA verify), which
+// is heavy on the Cortex-A9. Idle connections are kept per host and reused.
+
+#define POOL_MAX 6
+
+static struct conn_s *pool[POOL_MAX];
+
+static conn *pool_take(const char *host, int port, int tls) {
+  conn *c = NULL;
+  sceKernelLockLwMutex(&pool_lock, 1, NULL);
+  for (int i = 0; i < POOL_MAX; i++) {
+    if (pool[i] && pool[i]->port == port && pool[i]->tls == tls && !strcmp(pool[i]->host, host)) {
+      c = pool[i];
+      pool[i] = NULL;
+      break;
+    }
+  }
+  sceKernelUnlockLwMutex(&pool_lock, 1);
+  return c;
+}
+
+static void pool_put(conn *c) {
+  conn *evicted = c;
+  sceKernelLockLwMutex(&pool_lock, 1, NULL);
+  for (int i = 0; i < POOL_MAX; i++) {
+    if (!pool[i]) {
+      pool[i] = c;
+      evicted = NULL;
+      break;
+    }
+  }
+  sceKernelUnlockLwMutex(&pool_lock, 1);
+  if (evicted) {
+    conn_close(evicted);
+    free(evicted);
+  }
+}
+
+static void conn_drop(conn *c) {
+  conn_close(c);
+  free(c);
+}
+
 // --- requests ---------------------------------------------------------------
 
 typedef struct {
@@ -289,7 +362,7 @@ static int send_request(conn *c, const char *method, const url_parts *u, const h
   n += sprintf(req + n, "%s %s HTTP/1.1\r\nHost: %s", method, u->path, u->host);
   if (!default_port)
     n += sprintf(req + n, ":%d", u->port);
-  n += sprintf(req + n, "\r\nUser-Agent: %s\r\nAccept-Encoding: identity\r\nConnection: close\r\n", USER_AGENT);
+  n += sprintf(req + n, "\r\nUser-Agent: %s\r\nAccept-Encoding: identity\r\nConnection: keep-alive\r\n", USER_AGENT);
   for (int i = 0; i < num_headers; i++) {
     if (!strcasecmp(headers[i].name, "Host") || !strcasecmp(headers[i].name, "Connection") ||
         !strcasecmp(headers[i].name, "Content-Length") || !strcasecmp(headers[i].name, "Accept-Encoding"))
@@ -324,23 +397,35 @@ int http_request(const char *method, const char *url, const http_header *headers
       snprintf(err, err_size, "unsupported URL: %s", current);
       return -1;
     }
-    conn *c = malloc(sizeof(conn));
-    if (conn_open(c, u.host, u.port, u.tls, err, err_size) < 0 ||
-        send_request(c, cur_method, &u, headers, num_headers, body, body_len) < 0) {
-      if (!err[0])
-        snprintf(err, err_size, "send failed");
-      conn_close(c);
-      free(c);
-      return -1;
-    }
-
+    // A pooled connection may have been closed by the server while idle;
+    // if it fails before the status line, retry once on a fresh one.
+    conn *c = NULL;
     char line[4096];
-    if (read_line(c, line, sizeof(line)) < 0 || strncmp(line, "HTTP/", 5) != 0) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+      c = (attempt == 0 && pool_ready) ? pool_take(u.host, u.port, u.tls) : NULL;
+      int reused = c != NULL;
+      if (!c) {
+        c = malloc(sizeof(conn));
+        if (conn_open(c, u.host, u.port, u.tls, err, err_size) < 0) {
+          conn_drop(c);
+          return -1;
+        }
+      }
+      if (send_request(c, cur_method, &u, headers, num_headers, body, body_len) == 0 &&
+          read_line(c, line, sizeof(line)) >= 0 && strncmp(line, "HTTP/", 5) == 0)
+        break;
+      conn_drop(c);
+      c = NULL;
+      if (!reused) {
+        snprintf(err, err_size, "no HTTP response from %s", u.host);
+        return -1;
+      }
+    }
+    if (!c) {
       snprintf(err, err_size, "no HTTP response from %s", u.host);
-      conn_close(c);
-      free(c);
       return -1;
     }
+    int keep_alive = strncmp(line, "HTTP/1.0", 8) != 0;
     int code = atoi(strchr(line, ' ') ? strchr(line, ' ') + 1 : "0");
     char status[256];
     strncpy(status, line, sizeof(status) - 1);
@@ -367,6 +452,8 @@ int http_request(const char *method, const char *url, const http_header *headers
         chunked = 1;
       else if (!strcasecmp(line, "Location"))
         strncpy(location, value, sizeof(location) - 1);
+      else if (!strcasecmp(line, "Connection") && strcasestr(value, "close"))
+        keep_alive = 0;
       if (nresp < 64) {
         size_t nl = strlen(line);
         storage[nresp] = malloc(nl + strlen(value) + 2);
@@ -392,8 +479,7 @@ int http_request(const char *method, const char *url, const http_header *headers
       L_DEBUG("http: %d redirect to %s", code, current);
       for (int i = 0; i < nresp; i++)
         free(storage[i]);
-      conn_close(c);
-      free(c);
+      conn_drop(c);  // the redirect body isn't drained, so don't reuse
       continue;
     }
 
@@ -404,21 +490,29 @@ int http_request(const char *method, const char *url, const http_header *headers
       free(storage[i]);
     }
 
-    // Body (none for 1xx/204/304, HEAD or an explicit zero length).
+    // Body (none for 1xx/204/304, HEAD or an explicit zero length). The
+    // connection is reusable only if the body was read to its exact end.
     size_t received = 0, total = content_length > 0 ? (size_t)content_length : 0;
     long remaining = chunked ? 0 : content_length;
+    int complete = 0;
     if (code == 204 || code == 304 || (code >= 100 && code < 200) || !strcmp(cur_method, "HEAD") ||
         (!chunked && content_length == 0))
-      ok = 0;
-    while (ok) {
+      complete = 1;
+    if (!chunked && content_length < 0)
+      keep_alive = 0;  // body ends at connection close
+    while (ok && !complete) {
       if (chunked && remaining == 0) {
         if (received && read_line(c, line, sizeof(line)) < 0)  // CRLF after previous chunk
           break;
         if (read_line(c, line, sizeof(line)) < 0)
           break;
         remaining = strtol(line, NULL, 16);
-        if (remaining <= 0)
+        if (remaining <= 0) {
+          while (read_line(c, line, sizeof(line)) > 0)  // trailers
+            ;
+          complete = 1;
           break;
+        }
       }
       int avail = conn_fill(c);
       if (avail <= 0)
@@ -434,12 +528,16 @@ int http_request(const char *method, const char *url, const http_header *headers
       c->pos += take;
       if (remaining >= 0) {
         remaining -= take;
-        if (!chunked && remaining == 0)
+        if (!chunked && remaining == 0) {
+          complete = 1;
           break;
+        }
       }
     }
-    conn_close(c);
-    free(c);
+    if (keep_alive && complete && ok && pool_ready)
+      pool_put(c);
+    else
+      conn_drop(c);
     L_INFO("http: %s %s -> %d (%u bytes)", cur_method, current, code, (unsigned)received);
     return code;
   }

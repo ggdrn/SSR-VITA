@@ -599,9 +599,8 @@ static jvalue www_init(jobj *self, const jvalue *a) {
   }
   L_INFO("www: %s %s (%u bytes, %d headers)", r->body ? "POST" : "GET", r->url, (unsigned)r->body_len,
          r->num_headers);
-  // mbedTLS handshakes need a roomy stack.
-  SceUID t = sceKernelCreateThread("www", www_thread, 0x10000100, 256 * 1024, 0, 0, NULL);
-  sceKernelStartThread(t, sizeof(r), &r);
+  // mbedTLS handshakes need a roomy stack (net_start_thread gives 256 KB).
+  net_start_thread("www", www_thread, sizeof(r), &r);
   return RET_VOID;
 }
 

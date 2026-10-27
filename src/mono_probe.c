@@ -227,7 +227,7 @@ void mono_probe(void) {
   static int dumps;
   if (dumps < 2 && objects > 0) {  // once early, once after things settle
     static int calls;
-    if (calls++ == 0 || calls == 5) {
+    if (calls++ == 0 || calls == 2) {
       dump_scene();
       dumps++;
     }
