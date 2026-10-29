@@ -157,9 +157,19 @@ static void install_alloc_trace(so_module *mono) {
   }
   static uint32_t profiler_state;
   alloc_trace_set_sizer(alloc_object_size);
+  // object.c's static profile_allocs gate was cleared at boot, when no
+  // profiler wanted allocations; every allocation path tests it before
+  // notifying. Re-arm it after checking the literal that addresses it.
+  uint32_t *gate = (uint32_t *)(mono->base + 0x3ae5ac);
+  if (mono->end < mono->base + 0x3ae5b0 || *(uint32_t *)(mono->base + 0x1fe438) != 0x001b01a0 ||
+      *(uint32_t *)(mono->base + 0x1fe400) != 0xe59f3030 || *(uint32_t *)(mono->base + 0x1fe404) != 0xe08f3003) {
+    L_WARN("alloc: profile_allocs gate not found; allocation classes not traced");
+    return;
+  }
   install(&profiler_state, NULL);
   install_alloc((void *)alloc_trace_record);
   set_events(0x80); // MONO_PROFILE_ALLOCATIONS for this profiler only
+  __atomic_store_n(gate, 1, __ATOMIC_RELEASE);
   L_INFO("alloc: per-class allocation trace installed (code JIT-compiled from now on)");
 }
 
@@ -441,6 +451,44 @@ static void patch_stage_il(void) {
     L_INFO("stage: removed per-block forced GC (automatic and transition GC preserved)");
   } else L_WARN("stage: ActivateBlock IL differs; forced GC left original");
   if (header) free_header(header);
+
+  // StateChangeLevel (level change inside a run) and OnClickEndPause (resume)
+  // run GC.Collect; Resources.UnloadUnusedAssets; GC.Collect. That froze the
+  // race for ~2.8 s every level change while native memory stayed flat
+  // (92.0 -> 92.7 -> 92.3 MiB): the previous level leaves nothing to unload.
+  // NOP only those three calls and the pop; the same cleanup still runs on
+  // stage start/end, on entering pause and on every scene change. Verified:
+  // no branch target or EH boundary inside the replaced span.
+  static const uint8_t gc_unload_gc[] = {0x28,0x89,0x08,0x00,0x0a,0x28,0xa7,0x05,0x00,0x0a,0x26,0x28,0x89,0x08,0x00,0x0a};
+  static const uint8_t gc_nops[sizeof(gc_unload_gc)] = {0};
+  static const uint8_t change_before[] = {0x38,0x9e,0x05,0x00,0x00};
+  static const uint8_t change_after[] = {0x28,0x09,0x3e,0x00,0x06};
+  static const uint8_t end_pause[] = {0x72,0x74,0x1b,0x00,0x70,0x72,0x94,0x1b,0x00,0x70,0x28,0x8a,0x3b,0x00,0x06,0x26,
+                                      0x28,0x89,0x08,0x00,0x0a,0x28,0xa7,0x05,0x00,0x0a,0x26,0x28,0x89,0x08,0x00,0x0a,
+                                      0x02,0x19,0x7d,0x59,0x14,0x00,0x04,0x02,0x22,0x00,0x00,0x80,0x3f,0x7d,0x5a,0x14,
+                                      0x00,0x04,0x2a};
+  const struct { const char *cls, *name; uint32_t size, at; } unload_sites[] = {
+    {"GameModeStage", "StateChangeLevel", 0x670, 0xc6},
+    {"HudCockpit", "OnClickEndPause", sizeof(end_pause), 0x10},
+  };
+  for (unsigned i = 0; i < sizeof(unload_sites) / sizeof(unload_sites[0]); i++) {
+    klass = api.class_from_name(game_image, "", unload_sites[i].cls);
+    method = klass ? api.get_method(klass, unload_sites[i].name, -1) : NULL;
+    header = method ? get_header(method) : NULL;
+    code = header ? get_code(header, &size, &stack) : NULL;
+    uint32_t at = unload_sites[i].at;
+    int ok = code && size == unload_sites[i].size && !memcmp(code + at, gc_unload_gc, sizeof(gc_unload_gc));
+    if (ok && i == 0)
+      ok = !memcmp(code + at - sizeof(change_before), change_before, sizeof(change_before)) &&
+           !memcmp(code + at + sizeof(gc_unload_gc), change_after, sizeof(change_after));
+    if (ok && i == 1) ok = !memcmp(code, end_pause, sizeof(end_pause));
+    if (ok) {
+      kuKernelCpuUnrestrictedMemcpy((void *)(code + at), gc_nops, sizeof(gc_nops));
+      kuKernelFlushCaches((void *)(code + at), sizeof(gc_nops));
+      L_INFO("stage: %s.%s no longer forces GC+UnloadUnusedAssets+GC", unload_sites[i].cls, unload_sites[i].name);
+    } else L_WARN("stage: %s.%s IL differs; forced cleanup left original", unload_sites[i].cls, unload_sites[i].name);
+    if (header) free_header(header);
+  }
 
   // LightPlaySE suppresses rings and other pickup cues in LightMode. Replace
   // its IsLightMode() result with false, keeping branch/stack/cue selection.
