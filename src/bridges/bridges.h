@@ -9,6 +9,10 @@
 // arguments or return values must carry this attribute.
 #define SOFTFP __attribute__((pcs("aapcs")))
 
+// Native graphics work in the last frame; no scene traversal or allocation.
+typedef struct { uint64_t draw_us, texture_us, present_us, link_us; } gl_perf_sample;
+void gl_perf_take(gl_perf_sample *sample);
+
 // libc_bridge.c
 // Fills `out` from the Vita's hardware RNG (any length).
 void vita_random(void *out, size_t len);
@@ -28,6 +32,10 @@ void proc_init(void);
 
 // mem_bridge.c
 void mem_init(void);
+
+// CPU affinity: includes CPU3 only when the kernel permits it.
+void thread_cpu_init(void);
+int thread_cpu_mask(void);
 
 // signal_bridge.c
 void signal_init(void);
@@ -50,6 +58,7 @@ const char *ime_poll(void);
 
 // audio_bridge.c
 void audio_init(void);
+void audio_diagnostics(void);
 
 // format_bridge.c
 // Rewrites C99 length modifiers (z, t, j) that newlib's printf/scanf lack.

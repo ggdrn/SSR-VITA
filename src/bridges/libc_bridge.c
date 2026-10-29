@@ -2,6 +2,8 @@
 // layouts, flag/errno numbering, stdio stream handles and path translation.
 
 #include "bridges.h"
+#include "../util/work_trace.h"
+#include "../util/observe.h"
 #include "../config.h"
 #include "../util/log.h"
 
@@ -117,7 +119,26 @@ static int is_std_stream(FILE *f) { return f == stdout || f == stderr; }
 FILE *fopen_bridge(const char *path, const char *mode) {
   char buf[512];
   const char *p = fs_translate(path, buf, sizeof(buf));
+  uint64_t observed_start = observe_now();
+  uint64_t perf_start = work_trace_begin();
   FILE *f = fopen(p, mode);
+  int observed_errno = errno;
+  size_t path_len = p ? strlen(p) : 0;
+  static const char bulk_suffix[] = ".sharedAssets";
+  if (f && mode && mode[0] == 'r' && !strchr(mode, '+') && strstr(p, "/UnityCache/Shared/") &&
+      path_len >= sizeof(bulk_suffix)-1 && !strcmp(p + path_len - (sizeof(bulk_suffix)-1), bulk_suffix)) {
+    // Keep normal FILE/fseek/EOF ownership and let newlib issue the caller's
+    // large read directly, rather than refill its small default buffer.
+    if (setvbuf(f, NULL, _IONBF, 0) == 0) {
+      static unsigned bulk_streams;
+      unsigned count = __atomic_add_fetch(&bulk_streams, 1, __ATOMIC_RELAXED);
+      if (count <= 4 || (count & (count - 1)) == 0) L_INFO("io: direct sharedAssets streams %u (newlib bulk path)", count);
+    }
+  }
+  work_trace_end(WORK_IO, perf_start, 0, (uintptr_t)__builtin_return_address(0));
+  if (f) observe_file_register((uintptr_t)f, path);
+  observe_span(OBS_FILE, path, observed_start, 0, f ? 0 : -1, (uintptr_t)f);
+  errno = observed_errno;
   if (!f) {
     SET_ERRNO();
     L_DEBUG("fopen(%s -> %s, %s) failed", path, p, mode);
@@ -125,12 +146,30 @@ FILE *fopen_bridge(const char *path, const char *mode) {
   return f;
 }
 
-FILE *fdopen_bridge(int fd, const char *mode) { return fdopen(fd, mode); }
-int fclose_bridge(void *f) { return fclose(F(f)); }
+FILE *fdopen_bridge(int fd, const char *mode) {
+  char label[128]; observe_file_label(fd, label, sizeof(label));
+  FILE *f = fdopen(fd, mode); int saved = errno;
+  if (f) observe_file_register((uintptr_t)f, label);
+  errno = saved; return f;
+}
+int fclose_bridge(void *f) {
+  int result = fclose(F(f)), saved = errno;
+  observe_file_forget((uintptr_t)f); errno = saved; return result;
+}
 int fflush_bridge(void *f) { return f ? fflush(F(f)) : fflush(NULL); }
 int ferror_bridge(void *f) { return ferror(F(f)); }
 void clearerr_bridge(void *f) { clearerr(F(f)); }
-size_t fread_bridge(void *p, size_t s, size_t n, void *f) { return fread(p, s, n, F(f)); }
+size_t fread_bridge(void *p, size_t s, size_t n, void *f) {
+  char observed_name[128]; observe_file_label((uintptr_t)f, observed_name, sizeof(observed_name));
+  uint64_t start = work_trace_begin();
+  uint64_t observed_start = observe_now();
+  size_t got = fread(p, s, n, F(f));
+  int observed_errno = errno;
+  work_trace_end(WORK_IO, start, (uint64_t)got * s, (uintptr_t)__builtin_return_address(0));
+  observe_span(OBS_FILE, observed_name, observed_start, (uint64_t)got * s, 0, (uintptr_t)f);
+  errno = observed_errno;
+  return got;
+}
 int fseek_bridge(void *f, long off, int whence) { return RET_ERRNO(fseek(F(f), off, whence)); }
 long ftell_bridge(void *f) { return ftell(F(f)); }
 char *fgets_bridge(char *s, int n, void *f) { return fgets(s, n, F(f)); }
@@ -317,7 +356,14 @@ int open_bridge(const char *path, int flags, ...) {
     }
     return open("ux0:", O_RDONLY);
   }
+  uint64_t perf_start = work_trace_begin();
+  uint64_t observed_start = observe_now();
   int fd = open(p, oflags_from_bionic(flags), mode);
+  int observed_errno = errno;
+  if (fd >= 0) observe_file_register(fd, path);
+  observe_span(OBS_FILE, path, observed_start, 0, fd < 0 ? -1 : 0, fd < 0 ? 0 : (uintptr_t)fd);
+  work_trace_end(WORK_IO, perf_start, 0, (uintptr_t)__builtin_return_address(0));
+  errno = observed_errno;
   if (fd < 0) {
     SET_ERRNO();
     L_DEBUG("open(%s -> %s, 0x%x) failed", path, p, flags);
@@ -342,6 +388,7 @@ int close_bridge(int fd) {
   int i = random_fd_slot(fd);
   if (i >= 0)
     random_fds[i] = random_fds[--random_fd_count];
+  observe_file_forget(fd);
   return RET_ERRNO(close(fd));
 }
 ssize_t read_bridge(int fd, void *b, size_t n) {
@@ -350,7 +397,15 @@ ssize_t read_bridge(int fd, void *b, size_t n) {
     vita_random(b, n);
     return n;
   }
-  return RET_ERRNO(read(fd, b, n));
+  char observed_name[128]; observe_file_label(fd, observed_name, sizeof(observed_name));
+  uint64_t start = work_trace_begin();
+  uint64_t observed_start = observe_now();
+  ssize_t got = read(fd, b, n);
+  int observed_errno = errno;
+  observe_span(OBS_FILE, observed_name, observed_start, got > 0 ? got : 0, got < 0 ? -1 : 0, fd);
+  work_trace_end(WORK_IO, start, got > 0 ? got : 0, (uintptr_t)__builtin_return_address(0));
+  errno = observed_errno;
+  return RET_ERRNO(got);
 }
 ssize_t write_bridge(int fd, const void *b, size_t n) {
   if (fd == 1 || fd == 2) {

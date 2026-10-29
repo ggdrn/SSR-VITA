@@ -93,9 +93,9 @@ int pthread_mutex_destroy_bridge(uint32_t *bm) {
 // Blocking waits run in short slices so a thread parked here still answers
 // signals queued by pthread_kill() (see signal_bridge.c). Without this, Mono's
 // GC waits forever for threads blocked on its allocation lock.
-// 20 ms: short enough for GC stop-the-world, long enough not to burn CPU
-// with hundreds of wakeups per second across idle threads.
-#define SLICE_NS (20 * 1000 * 1000)
+// 5 ms bounds cooperative GC suspension latency; 20 ms let acknowledgements
+// wait longer than the frame budget when several guest threads contend.
+#define SLICE_NS (5 * 1000 * 1000)
 
 static void deadline_after(struct timespec *ts, int64_t ns) {
   clock_gettime(CLOCK_REALTIME, ts);
@@ -241,6 +241,20 @@ int pthread_cond_timedwait_monotonic_np_bridge(uint32_t *bc, uint32_t *bm, const
   return cond_timedwait(bc, bm, t, 1);
 }
 
+// Probe the actual kernel permission once. CapUnlocker can permit CPU3;
+// retain the normal user-core mask on consoles where it is unavailable.
+static int game_cpu_mask = SCE_KERNEL_CPU_MASK_USER_ALL;
+
+void thread_cpu_init(void) {
+  int requested = SCE_KERNEL_CPU_MASK_USER_ALL | SCE_KERNEL_CPU_MASK_SYSTEM;
+  int rc = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), requested);
+  if (rc >= 0) game_cpu_mask = requested;
+  L_INFO("cpu: requested mask 0x%X result 0x%08X; active mask 0x%X (%d cores)",
+    requested, rc, game_cpu_mask, __builtin_popcount((unsigned)game_cpu_mask));
+}
+
+int thread_cpu_mask(void) { return game_cpu_mask; }
+
 // --- threads ----------------------------------------------------------------
 
 typedef struct {
@@ -279,7 +293,7 @@ static void *thread_trampoline(void *arg) {
   s->uid = sceKernelGetThreadId();
   // Let game threads run on any user core, so one busy-waiting thread can't
   // starve the thread it waits for.
-  sceKernelChangeThreadCpuAffinityMask(s->uid, SCE_KERNEL_CPU_MASK_USER_ALL);
+  sceKernelChangeThreadCpuAffinityMask(s->uid, thread_cpu_mask());
   return s->func(s->arg);
 }
 

@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include "../util/observe.h"
 // Vita front touch + buttons -> Android NDK input events (AInputQueue).
 // Unity reads input through AInputQueue/AMotionEvent/AKeyEvent, so we keep a
 // small ring of synthetic events that the looper reports as ready.
@@ -63,6 +65,7 @@ typedef struct {
 
 static input_event queue[QUEUE_SIZE];
 static int q_head, q_tail;
+static unsigned input_overflows;
 static SceKernelLwMutexWork q_lock;
 
 // Events handed to the game stay valid until finishEvent; keep a separate pool.
@@ -74,10 +77,14 @@ static int64_t now_ns(void) { return (int64_t)sceKernelGetProcessTimeWide() * 10
 static void push_event(const input_event *e) {
   sceKernelLockLwMutex(&q_lock, 1, NULL);
   int next = (q_tail + 1) % QUEUE_SIZE;
-  if (next != q_head) {
-    queue[q_tail] = *e;
-    q_tail = next;
+  if (next == q_head) {
+    // Keep the newest state, especially UP/CANCEL, rather than leaving a
+    // pointer permanently pressed when the game temporarily stops draining.
+    q_head = (q_head + 1) % QUEUE_SIZE;
+    input_overflows++;
   }
+  queue[q_tail] = *e;
+  q_tail = next;
   sceKernelUnlockLwMutex(&q_lock, 1);
 }
 
@@ -115,6 +122,13 @@ int AInputQueue_getEvent_bridge(void *q, input_event **out) {
   q_head = (q_head + 1) % QUEUE_SIZE;
   sceKernelUnlockLwMutex(&q_lock, 1);
   *out = e;
+  if (e->type == AINPUT_EVENT_TYPE_MOTION && (e->action & 0xff) != AMOTION_EVENT_ACTION_MOVE) {
+    unsigned index = (e->action >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT) & 0xff;
+    int id = index < (unsigned)e->pointer_count ? e->pointers[index].id : -1;
+    char label[96];
+    snprintf(label, sizeof(label), "dispatch action=%d id=%d count=%d", e->action, id, e->pointer_count);
+    observe_span(OBS_INPUT, label, observe_now(), 0, 0, id);
+  }
   return 0;
 }
 
@@ -188,14 +202,14 @@ SOFTFP float AMotionEvent_getHistoricalSize_bridge(const input_event *e, size_t 
 
 typedef struct {
   int active;
-  int id;  // Android pointer id
+  int id;  // Bounded Android pointer id, stable until UP
+  int hardware_id;
   float x, y;
 } touch_slot;
 
 static touch_slot slots[MAX_POINTERS];
 static uint32_t prev_buttons;
 static int64_t touch_down_time;
-static int next_pointer_id;
 
 // Virtual tap pointer driven by Cross/Circle.
 #define VIRTUAL_TAP_SLOT (MAX_POINTERS - 1)
@@ -232,11 +246,16 @@ static int active_count(void) {
 }
 
 static void pointer_down(int slot, float x, float y) {
+  char observed_name[64];
+  snprintf(observed_name, sizeof(observed_name), "down id=%d slot=%d x=%d y=%d", slot, slot, (int)x, (int)y);
+  observe_span(OBS_INPUT, observed_name, observe_now(), 0, 0, slot);
   int was_empty = active_count() == 0;
   if (was_empty)
     touch_down_time = now_ns();
   slots[slot].active = 1;
-  slots[slot].id = next_pointer_id++ & 0xff;
+  // Android pointer IDs are bounded (0..31). Reusing a free slot is valid
+  // after UP; an ever-increasing 8-bit ID broke that contract after 32 taps.
+  slots[slot].id = slot;
   slots[slot].x = x;
   slots[slot].y = y;
   input_event e;
@@ -247,6 +266,9 @@ static void pointer_down(int slot, float x, float y) {
 }
 
 static void pointer_up(int slot) {
+  char label[80];
+  snprintf(label, sizeof(label), "up id=%d slot=%d x=%d y=%d", slots[slot].id, slot, (int)slots[slot].x, (int)slots[slot].y);
+  observe_span(OBS_INPUT, label, observe_now(), 0, 0, slot);
   input_event e;
   int last = active_count() == 1;
   int action = last ? AMOTION_EVENT_ACTION_UP
@@ -254,6 +276,7 @@ static void pointer_up(int slot) {
   build_motion(&e, action);
   push_event(&e);
   slots[slot].active = 0;
+  slots[slot].hardware_id = -1;
 }
 
 static void push_key(int keycode, int down) {
@@ -281,32 +304,43 @@ static const struct {
 
 void input_poll(void) {
   // Touch: front panel is 1920x1088.
-  SceTouchData touch;
-  if (sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) >= 0) {
-    int seen[MAX_POINTERS - 1] = {0};
-    for (int r = 0; r < touch.reportNum && r < MAX_POINTERS - 1; r++) {
-      int slot = touch.report[r].id % (MAX_POINTERS - 1);
-      float x = touch.report[r].x * SCREEN_W / 1920.0f;
-      float y = touch.report[r].y * SCREEN_H / 1088.0f;
-      seen[slot] = 1;
-      if (!slots[slot].active) {
-        pointer_down(slot, x, y);
-      } else if (slots[slot].x != x || slots[slot].y != y) {
-        slots[slot].x = x;
-        slots[slot].y = y;
-        input_event e;
-        build_motion(&e, AMOTION_EVENT_ACTION_MOVE);
-        push_event(&e);
+  SceTouchData touch = {0};
+  if (sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) == 1) {
+    // Match real report IDs to free slots; modulo mapping can alias a new
+    // finger to another finger that is still held down.
+    for (int slot = 0; slot < VIRTUAL_TAP_SLOT; slot++) {
+      if (!slots[slot].active) continue;
+      int present = 0;
+      for (unsigned r = 0; r < touch.reportNum; r++)
+        if (touch.report[r].id == slots[slot].hardware_id) { present = 1; break; }
+      if (!present) pointer_up(slot);
+    }
+    int moved = 0, new_down = 0;
+    for (unsigned r = 0; r < touch.reportNum; r++) {
+      for (int slot = 0; slot < VIRTUAL_TAP_SLOT; slot++) {
+        if (!slots[slot].active || slots[slot].hardware_id != touch.report[r].id) continue;
+        float x = touch.report[r].x * SCREEN_W / 1920.0f, y = touch.report[r].y * SCREEN_H / 1088.0f;
+        if (slots[slot].x != x || slots[slot].y != y) moved = 1;
+        slots[slot].x = x; slots[slot].y = y;
       }
     }
-    for (int s = 0; s < MAX_POINTERS - 1; s++) {
-      if (slots[s].active && !seen[s])
-        pointer_up(s);
+    for (unsigned r = 0; r < touch.reportNum; r++) {
+      int found = 0, free_slot = -1;
+      for (int slot = 0; slot < VIRTUAL_TAP_SLOT; slot++) {
+        if (slots[slot].active && slots[slot].hardware_id == touch.report[r].id) { found = 1; break; }
+        if (!slots[slot].active && free_slot < 0) free_slot = slot;
+      }
+      if (!found && free_slot >= 0) {
+        new_down = 1;
+        slots[free_slot].hardware_id = touch.report[r].id;
+        pointer_down(free_slot, touch.report[r].x * SCREEN_W / 1920.0f, touch.report[r].y * SCREEN_H / 1088.0f);
+      }
     }
+    if (moved && !new_down) { input_event e; build_motion(&e, AMOTION_EVENT_ACTION_MOVE); push_event(&e); }
   }
 
-  SceCtrlData pad;
-  sceCtrlPeekBufferPositive(0, &pad, 1);
+  SceCtrlData pad = {0};
+  if (sceCtrlPeekBufferPositive(0, &pad, 1) <= 0) pad.buttons = prev_buttons;
   uint32_t changed = pad.buttons ^ prev_buttons;
   for (size_t i = 0; i < sizeof(key_map) / sizeof(key_map[0]); i++) {
     if (changed & key_map[i].vita)
@@ -321,9 +355,15 @@ void input_poll(void) {
     pointer_up(VIRTUAL_TAP_SLOT);
 
   prev_buttons = pad.buttons;
+  static unsigned last_overflows;
+  if (input_overflows != last_overflows) {
+    L_WARN("input: queue overflow %u (latest state preserved)", input_overflows);
+    last_overflows = input_overflows;
+  }
 }
 
 void input_init(void) {
+  for (int i = 0; i < MAX_POINTERS; i++) slots[i].hardware_id = -1;
   sceKernelCreateLwMutex(&q_lock, "input", 0, 0, NULL);
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
   sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);

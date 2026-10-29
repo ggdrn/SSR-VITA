@@ -1,3 +1,5 @@
+#include "util/observe.h"
+#include "util/work_trace.h"
 // Replays what the Java side of a Unity 4.x Android player does:
 //   System.loadLibrary("main")        -> libmain JNI_OnLoad
 //   NativeLoader.load(libDir)         -> libmain loads libmono/libunity
@@ -14,12 +16,19 @@
 
 #include <string.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 
 #define UNITY_PLAYER "com/unity3d/player/UnityPlayer"
 #define NATIVE_LOADER "com/unity3d/player/NativeLoader"
 
 void audio_fmod_start(void);
-void mono_probe(void);
+void mono_probe_tick(unsigned frame);
+void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame);
+void mono_audio_tick(void);
+void mono_menu_fix(void);
+void mono_texture_budget_tick(void);
+void mono_gc_policy_tick(void);
+void mono_observe_tick(void);
 void audio_fmod_stop(void);
 
 static void *env;
@@ -36,7 +45,9 @@ static void call_void(const char *name) {
   void (*fn)(void *, jobj *) = native(UNITY_PLAYER, name);
   if (fn) {
     L_INFO("unity: %s()", name);
+    uint64_t start = observe_now();
     fn(env, player);
+    observe_span(OBS_BOOT, name, start, 0, 0, 0);
   }
 }
 
@@ -84,7 +95,9 @@ static int jni_onload(const char *lib) {
   int (*onload)(void *, void *) = m ? (void *)so_symbol(m, "JNI_OnLoad") : NULL;
   if (!onload)
     return -1;
+  uint64_t start = observe_now();
   int v = onload(jni_get_vm(), NULL);
+  observe_span(OBS_BOOT, lib, start, 0, v, 0);
   L_INFO("unity: %s JNI_OnLoad -> 0x%X", lib, v);
   return v;
 }
@@ -109,12 +122,16 @@ int unity_run(void) {
   void (*initJni)(void *, jobj *, jobj *) = native(UNITY_PLAYER, "initJni");
   if (initJni) {
     L_INFO("unity: initJni()");
+    uint64_t start = observe_now();
     initJni(env, player, jni_new_object("com/unity3d/player/UnityPlayerNativeActivity"));
+    observe_span(OBS_BOOT, "unity.initJni", start, 0, 0, 0);
   }
   void (*nativeFile)(void *, jobj *, jobj *) = native(UNITY_PLAYER, "nativeFile");
   if (nativeFile) {
     L_INFO("unity: nativeFile(%s)", fs_apk_android_path());
+    uint64_t start = observe_now();
     nativeFile(env, player, jni_new_string(fs_apk_android_path()));
+    observe_span(OBS_BOOT, "unity.nativeFile", start, 0, 0, 0);
   }
 
   // UnityPlayer's constructor hands Unity the WWW class; without it the first
@@ -131,7 +148,7 @@ int unity_run(void) {
   call_bool_arg("nativeFocusChanged", 1);
 
   // 4. Audio device (FMOD Java pump).
-  int (*fmodInitJni)(void *, jobj *) = (void *)so_symbol_global("Java_org_fmod_FMODAudioDevice_fmodInitJni");
+  int (*fmodInitJni)(void *, jobj *) = native("org/fmod/FMODAudioDevice", "fmodInitJni");
   if (fmodInitJni) {
     jobj *dev = jni_new_object("org/fmod/FMODAudioDevice");
     L_INFO("unity: fmodInitJni -> %d", fmodInitJni(env, dev));
@@ -144,10 +161,14 @@ int unity_run(void) {
     fatal_error("Unity did not register nativeRender.\nSee " LOG_PATH);
   log_heap_usage("before render loop");
   L_INFO("unity: entering render loop");
+  observe_mark("render-loop.begin");
   unsigned frame = 0;
   void (*set_input_string)(void *, jobj *, jobj *) = native(UNITY_PLAYER, "nativeSetInputString");
   void (*soft_input_closed)(void *, jobj *) = native(UNITY_PLAYER, "nativeSoftInputClosed");
   for (;;) {
+    observe_begin_frame(frame + 1);
+    work_trace_frame_begin();
+    uint64_t frame_start = sceKernelGetProcessTimeWide();
     // While the system keyboard is up it owns the touchscreen and buttons.
     if (!ime_running())
       input_poll();
@@ -162,17 +183,35 @@ int unity_run(void) {
       unity_resize_requested = 0;
       unity_surface_changed();
     }
+    if (frame < 300 && frame % 30 == 1) mono_menu_fix();
+    if (frame % 30 == 1) {
+      mono_texture_budget_tick();
+      mono_gc_policy_tick();
+    }
+    uint64_t render_start = sceKernelGetProcessTimeWide();
     if (!render(env, player)) {
       L_INFO("unity: nativeRender returned false after %u frames", frame);
       break;
     }
+    uint64_t render_us = sceKernelGetProcessTimeWide() - render_start;
+    static uint64_t total_us, worst_us;
+    static unsigned slow_frames;
+    total_us += render_us;
+    if (render_us > worst_us) worst_us = render_us;
+    if (render_us > 50000) slow_frames++;
     watchdog_frames = ++frame;
+    if (frame % 600 == 0) {
+      L_INFO("perf: 600 renders avg %.2f ms max %.2f ms >50ms %u", total_us / 600000.0, worst_us / 1000.0, slow_frames);
+      total_us = worst_us = 0;
+      slow_frames = 0;
+    }
     if (frame == 1 || frame % 600 == 0)
       L_INFO("unity: frame %u", frame);
-    // What the C# side thinks is on screen. It walks the whole scene through
-    // Mono, so it runs twice early and then about once a minute.
-    if (frame == 300 || frame == 900 || frame % 3600 == 300)
-      mono_probe();
+    if (frame % 15 == 1) mono_observe_tick();
+    if (frame % 30 == 1) mono_audio_tick();
+    if (frame % 300 == 0)
+      mono_probe_tick(frame);
+    mono_perf_tick(render_us, sceKernelGetProcessTimeWide() - frame_start, frame);
   }
   call_void("nativeDone");
   // Let the audio thread leave its wait loop before the process goes away.

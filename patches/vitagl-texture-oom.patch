@@ -1,0 +1,142 @@
+diff --git a/source/shared.h b/source/shared.h
+index 2d4b0f3..9a0276f 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -436,6 +436,9 @@ extern GLboolean prim_is_non_native; // Flag for when a primitive not supported
+ 	}
+ #endif
+ 
++// Optional application diagnostic; absent in ordinary vitaGL consumers.
++extern void vgl_texture_allocation_failure(const char *operation, uint32_t bytes) __attribute__((weak));
++
+ // Error set funcs
+ #define SET_GL_ERROR(x) \
+ 	vgl_log("%s:%d: %s set %s\n", __FILE__, __LINE__, __func__, #x); \
+diff --git a/source/textures.c b/source/textures.c
+index 0864ddf..2eea51e 100644
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -948,6 +948,10 @@ static inline __attribute__((always_inline)) void _glTexSubImage2D(texture *tex,
+ #ifdef HAVE_UNPURE_TEXTURES
+ 	level -= tex->mip_start;
+ #endif
++	// A failed mip allocation leaves only the original levels available.
++	if (!tex->data || tex->status != TEX_VALID || level < 0 || level >= tex->mip_count) {
++		SET_GL_ERROR(GL_INVALID_OPERATION)
++	}
+ 	SceGxmTextureFormat tex_format = vglGetTexFormat(&tex->gxm_tex);
+ 	uint8_t bpp = tex_format_to_bytespp(tex_format);
+ 	uint32_t orig_w, orig_h;
+@@ -1000,10 +1004,18 @@ static inline __attribute__((always_inline)) void _glTexSubImage2D(texture *tex,
+ 			size = orig_h * VGL_ALIGN(orig_w, 8) * bpp;
+ 		}
+ 		void *texture_data = gpu_alloc_mapped_for_gpu(size);
+-		vgl_fast_memcpy(texture_data, tex->data, size);
+-		gpu_free_texture_data(tex);
+-		sceGxmTextureSetData(&tex->gxm_tex, texture_data);
+-		tex->data = texture_data;
++		if (texture_data) {
++			vgl_fast_memcpy(texture_data, tex->data, size);
++			gpu_free_texture_data(tex);
++			sceGxmTextureSetData(&tex->gxm_tex, texture_data);
++			tex->data = texture_data;
++		} else {
++			// Keep the original storage on OOM. Finish all queued draws before
++			// updating it in place; never copy to NULL or retire this live buffer.
++			vgl_log("SRR: texture update allocation failed (%u bytes); finishing GPU for in-place update\n", size);
++			if (vgl_texture_allocation_failure) vgl_texture_allocation_failure("update-in-place", size);
++			glFinish();
++		}
+ 		tex->last_frame = OBJ_NOT_USED;
+ #ifdef HAVE_TEX_CACHE
+ 		mark_as_cacheable(tex)
+diff --git a/source/utils/gpu_utils.c b/source/utils/gpu_utils.c
+index 6ae72c0..22c0e1b 100644
+--- a/source/utils/gpu_utils.c
++++ b/source/utils/gpu_utils.c
+@@ -154,6 +154,22 @@ static inline __attribute__((always_inline)) uint32_t vgl_cache_old_textures(siz
+ }
+ #endif
+ 
++#if !defined(HAVE_SINGLE_THREADED_GC) || defined(HAVE_PTHREAD)
++// Drain the frame-job permits before submitting an emergency collection.
++// A single permit does not acknowledge completion: the semaphore starts with
++// FRAME_PURGE_FREQ permits. Holding all of them lets the next returned permit
++// acknowledge this job, then restores the normal frame scheduling capacity.
++static void gpu_wait_emergency_collection(void) {
++	if (sceKernelWaitSema(gc_mutex[1], FRAME_PURGE_FREQ, NULL) < 0) return;
++	if (sceKernelSignalSema(gc_mutex[0], 1) < 0) {
++		sceKernelSignalSema(gc_mutex[1], FRAME_PURGE_FREQ);
++		return;
++	}
++	int completed = sceKernelWaitSema(gc_mutex[1], 1, NULL);
++	sceKernelSignalSema(gc_mutex[1], completed < 0 ? FRAME_PURGE_FREQ - 1 : FRAME_PURGE_FREQ);
++}
++#endif
++
+ int unsafe_allocator_counter = 0;
+ void *gpu_alloc_mapped_aligned_unsafe_for_cpu(size_t alignment, size_t size) {
+ 	// Performing a garbage collection cycle prior to attempting to allocate the memory again
+@@ -164,9 +180,7 @@ void *gpu_alloc_mapped_aligned_unsafe_for_cpu(size_t alignment, size_t size) {
+ #if defined(HAVE_SINGLE_THREADED_GC) && !defined(HAVE_PTHREAD)
+ 	garbage_collector(0, NULL);
+ #else
+-	sceKernelWaitSema(gc_mutex[1], 1, NULL);
+-	sceKernelSignalSema(gc_mutex[0], 1);
+-	sceKernelDelayThread(1000000);
++	gpu_wait_emergency_collection();
+ #endif
+ 
+ 	// Allocating requested memblock
+@@ -190,9 +204,7 @@ void *gpu_alloc_mapped_aligned_unsafe_for_gpu(size_t alignment, size_t size) {
+ #if defined(HAVE_SINGLE_THREADED_GC) && !defined(HAVE_PTHREAD)
+ 	garbage_collector(0, NULL);
+ #else
+-	sceKernelWaitSema(gc_mutex[1], 1, NULL);
+-	sceKernelSignalSema(gc_mutex[0], 1);
+-	sceKernelDelayThread(1000000);
++	gpu_wait_emergency_collection();
+ #endif
+ 
+ 	// Allocating requested memblock
+@@ -402,7 +414,20 @@ void gpu_alloc_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, const
+ 	// Allocating texture data buffer
+ 	const int aligned_w = VGL_ALIGN(w, 8);
+ 	const int tex_size = aligned_w * h * bpp;
+-	void *texture_data = gpu_alloc_mapped_for_gpu(tex_size);
++	void *texture_data = NULL;
++	if (tex->use_mips) {
++		// Reserve the chain with the base upload when a pool can satisfy it
++		// immediately. Growing later can require both base and chain at once.
++		uint32_t mw = nearest_po2(w), mh = nearest_po2(h), capacity = 0;
++		while (1) {
++			capacity += MAX(mw, 8) * mh * bpp;
++			if (mw <= 1 || mh <= 1) break;
++			mw /= 2;
++			mh /= 2;
++		}
++		texture_data = gpu_alloc_mapped_aligned_for_gpu_inner(MEM_ALIGNMENT, capacity);
++	}
++	if (!texture_data) texture_data = gpu_alloc_mapped_for_gpu(tex_size);
+ 
+ 	if (texture_data) {
+ 		// Initializing texture data buffer
+@@ -886,10 +911,17 @@ void gpu_alloc_mipmaps(int level, texture *tex) {
+ 		SceGxmTransferFormat fmt = tex_format_to_transfer(format);
+ 
+ 		// Reallocating texture with full mipchain size
+-		void *texture_data = count <= 0 ? vgl_realloc(tex->data, size) : tex->data;
++		void *texture_data = tex->data;
++		if (count <= 0 && vgl_malloc_usable_size(tex->data) < size)
++			texture_data = vgl_realloc(tex->data, size);
+ 		if (count <= 0 && !texture_data) {
+ 			// Reallocation in the same mspace failed, try manually.
+ 			texture_data = gpu_alloc_mapped_for_gpu(size);
++			if (!texture_data) {
++				vgl_log("SRR: mipmap allocation failed (%u bytes, %ux%u); preserving base texture\n", size, orig_w, orig_h);
++				if (vgl_texture_allocation_failure) vgl_texture_allocation_failure("mipmap", size);
++				SET_GL_ERROR(GL_OUT_OF_MEMORY)
++			}
+ 			vgl_memcpy(texture_data, tex->data, VGL_ALIGN(orig_w, 8) * orig_h * bpp);
+ 			gpu_free_texture_data(tex);
+ 		}

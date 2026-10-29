@@ -6,6 +6,7 @@
 
 #include "bridges.h"
 #include "../loader/so_util.h"
+#include "../jni/jni.h"
 #include "../util/log.h"
 
 #include <malloc.h>
@@ -132,12 +133,17 @@ struct sl_object {
 
   // player state
   int channels, rate, bits;
+  int output_rate;
   volatile SLuint32 play_state;
   volatile int16_t volume_mb;
-  struct {
+  struct sl_buffer {
     const void *buf;
     SLuint32 size;
-  } bq[BQ_MAX];
+  } *bq;
+  int bq_capacity;
+  SceKernelLwMutexWork bq_lock;
+  unsigned bq_generation;
+  unsigned enqueued;
   volatile int bq_head, bq_count;
   SLuint32 bq_play_index;
   sl_bq_callback cb;
@@ -146,7 +152,17 @@ struct sl_object {
   SceUID thread;
   volatile int quit;
   int port;
+  unsigned buffers_seen;
+  int heard_pcm;
+  unsigned pcm_nonzero;
+  uint64_t pcm_samples, pcm_clipped;
+  int pcm_peak;
+  uint64_t frames_played;
+  sl_object *next_player;
 };
+
+static sl_object *players;
+static SceKernelLwMutexWork players_lock;
 
 #define OBJ_FROM(field, self) ((sl_object *)((char *)(self) - offsetof(sl_object, field)))
 
@@ -184,11 +200,18 @@ static SLresult obj_GetInterface(void *self, const SLInterfaceID_ *iid, void *ou
 static void obj_Destroy(void *self) {
   sl_object *o = OBJ_FROM(obj_itf, self);
   if (o->type == OBJ_PLAYER) {
+    sceKernelLockLwMutex(&players_lock, 1, NULL);
+    for (sl_object **p = &players; *p; p = &(*p)->next_player) {
+      if (*p == o) { *p = o->next_player; break; }
+    }
+    sceKernelUnlockLwMutex(&players_lock, 1);
     o->quit = 1;
     sceKernelSignalSema(o->sema, 1);
     sceKernelWaitThreadEnd(o->thread, NULL, NULL);
     sceKernelDeleteThread(o->thread);
     sceKernelDeleteSema(o->sema);
+    sceKernelDeleteLwMutex(&o->bq_lock);
+    free(o->bq);
     if (o->port >= 0)
       sceAudioOutReleasePort(o->port);
   }
@@ -203,6 +226,7 @@ static const SLObjectItf_ object_vtbl = {obj_Realize, obj_Resume, obj_GetState, 
 
 static SLresult play_SetPlayState(void *self, SLuint32 state) {
   sl_object *o = OBJ_FROM(play_itf, self);
+  L_INFO("opensl: port %d play state %u", o->port, state);
   o->play_state = state;
   sceKernelSignalSema(o->sema, 1);
   return SL_RESULT_SUCCESS;
@@ -215,40 +239,68 @@ static SLresult play_GetZero(void *self, SLuint32 *v) {
   *v = 0;
   return SL_RESULT_SUCCESS;
 }
+static SLresult play_GetPosition(void *self, SLuint32 *ms) {
+  sl_object *o = OBJ_FROM(play_itf, self);
+  sceKernelLockLwMutex(&o->bq_lock, 1, NULL);
+  *ms = o->frames_played * 1000 / o->rate;
+  sceKernelUnlockLwMutex(&o->bq_lock, 1);
+  return SL_RESULT_SUCCESS;
+}
 static SLresult play_Ok1(void *self, SLuint32 v) { return SL_RESULT_SUCCESS; }
 static SLresult play_Ok0(void *self) { return SL_RESULT_SUCCESS; }
 static SLresult play_RegisterCallback(void *self, void *cb, void *ctx) { return SL_RESULT_SUCCESS; }
 
-static const SLPlayItf_ play_vtbl = {play_SetPlayState, play_GetPlayState, play_GetZero, play_GetZero,
+static const SLPlayItf_ play_vtbl = {play_SetPlayState, play_GetPlayState, play_GetZero, play_GetPosition,
                                       play_RegisterCallback, play_Ok1, play_GetZero, play_Ok1,
                                       play_Ok0, play_GetZero, play_Ok1, play_GetZero};
 
 static SLresult bq_Enqueue(void *self, const void *buf, SLuint32 size) {
   sl_object *o = OBJ_FROM(bq_itf, self);
-  if (o->bq_count >= BQ_MAX)
+  if (!buf || !size || size % (o->channels * sizeof(int16_t)))
+    return SL_RESULT_PARAMETER_INVALID;
+  sceKernelLockLwMutex(&o->bq_lock, 1, NULL);
+  if (o->bq_count >= o->bq_capacity) {
+    sceKernelUnlockLwMutex(&o->bq_lock, 1);
+    L_WARN("opensl: port %d queue full (%d buffers)", o->port, o->bq_capacity);
     return 7;  // SL_RESULT_BUFFER_INSUFFICIENT
-  int idx = (o->bq_head + o->bq_count) % BQ_MAX;
+  }
+  int idx = (o->bq_head + o->bq_count) % o->bq_capacity;
   o->bq[idx].buf = buf;
   o->bq[idx].size = size;
-  __sync_fetch_and_add(&o->bq_count, 1);
+  o->bq_count++;
+  if (++o->enqueued == 1)
+    L_INFO("opensl: port %d first enqueue %u bytes, state %u", o->port, size, o->play_state);
+  sceKernelUnlockLwMutex(&o->bq_lock, 1);
   sceKernelSignalSema(o->sema, 1);
   return SL_RESULT_SUCCESS;
 }
 static SLresult bq_Clear(void *self) {
   sl_object *o = OBJ_FROM(bq_itf, self);
-  o->bq_count = 0;
+  // The consumer owns a staging copy; generation prevents its completion
+  // from removing a new buffer after Clear returns the old queue to CRI.
+  sceKernelLockLwMutex(&o->bq_lock, 1, NULL);
+  o->bq_count = o->bq_head = 0;
+  o->bq_play_index = 0;
+  o->frames_played = 0;
+  o->bq_generation++;
+  sceKernelUnlockLwMutex(&o->bq_lock, 1);
   return SL_RESULT_SUCCESS;
 }
 static SLresult bq_GetState(void *self, SLuint32 *state) {
   sl_object *o = OBJ_FROM(bq_itf, self);
+  sceKernelLockLwMutex(&o->bq_lock, 1, NULL);
   state[0] = o->bq_count;
   state[1] = o->bq_play_index;
+  sceKernelUnlockLwMutex(&o->bq_lock, 1);
   return SL_RESULT_SUCCESS;
 }
 static SLresult bq_RegisterCallback(void *self, sl_bq_callback cb, void *ctx) {
   sl_object *o = OBJ_FROM(bq_itf, self);
+  sceKernelLockLwMutex(&o->bq_lock, 1, NULL);
   o->cb = cb;
   o->cb_ctx = ctx;
+  sceKernelUnlockLwMutex(&o->bq_lock, 1);
+  L_INFO("opensl: port %d buffer callback registered", o->port);
   return SL_RESULT_SUCCESS;
 }
 
@@ -300,23 +352,53 @@ static int mb_to_vita_volume(int16_t mb) {
   return (int)(lin * SCE_AUDIO_VOLUME_0DB);
 }
 
+static int output_grain(sl_object *o, const int16_t *pcm) {
+  if (o->port < 0) return 0;
+  int rc = sceAudioOutOutput(o->port, pcm);
+  if (rc < 0) {
+    L_ERROR("opensl: output failed port %d error 0x%08X", o->port, rc);
+    o->quit = 1;
+  }
+  return rc;
+}
+
 static int player_thread(SceSize args, void *argp) {
   sl_object *o = *(sl_object **)argp;
-  int16_t *out = memalign(64, SL_GRAIN * 2 * sizeof(int16_t));
+  // Keep the last submitted grain untouched while the device plays it.
+  // sceAudioOutOutput queues this pointer; alternate grains before writing.
+  int16_t *out_base = memalign(64, SL_GRAIN * 2 * 2 * sizeof(int16_t));
+  int out_index = 0;
+  int16_t *out = out_base;
+  if (!out_base) {
+    L_ERROR("opensl: PCM output allocation failed");
+    o->quit = 1;
+    return 0;
+  }
+  uint8_t *input = NULL;
+  size_t input_capacity = 0;
   int out_frames = 0;
   int last_vol = -1;
   const int in_frame_bytes = o->channels * (o->bits / 8);
-  // Linear resampling to the MAIN port's fixed 48 kHz: `phase` (16.16) is the
+  // Fallback resampling when a native-frequency port is unavailable:
+  // `phase` (16.16) is the
   // output position between the previous and current input frame.
-  const uint32_t step = (uint32_t)(((uint64_t)o->rate << 16) / SL_PORT_RATE);
+  int port_rate = o->output_rate > 0 ? o->output_rate : SL_PORT_RATE;
+  const uint32_t step = (uint32_t)(((uint64_t)o->rate << 16) / port_rate);
+  unsigned generation = 0;
   uint32_t phase = 0;
   int16_t prev[2] = {0, 0};
 
   while (!o->quit) {
+    sceKernelLockLwMutex(&o->bq_lock, 1, NULL);
     if (o->play_state != SL_PLAYSTATE_PLAYING || o->bq_count == 0) {
+      sceKernelUnlockLwMutex(&o->bq_lock, 1);
       SceUInt timeout = 10000;
       sceKernelWaitSema(o->sema, 1, &timeout);
       continue;
+    }
+    if (generation != o->bq_generation) {
+      generation = o->bq_generation;
+      out_frames = 0; phase = 0; prev[0] = prev[1] = 0;
     }
     int vol = mb_to_vita_volume(o->volume_mb);
     if (vol != last_vol) {
@@ -325,46 +407,120 @@ static int player_thread(SceSize args, void *argp) {
       last_vol = vol;
     }
 
-    const uint8_t *buf = o->bq[o->bq_head].buf;
-    int frames = o->bq[o->bq_head].size / in_frame_bytes;
-    for (int f = 0; f < frames; f++) {
+    // Own the current PCM while the hardware blocks. Holding bq_lock across
+    // sceAudioOutOutput made CRI's producer/GetState wait for the audio clock.
+    // Clear may now return/reuse the guest buffer without racing this reader.
+    size_t bytes = o->bq[o->bq_head].size;
+    if (bytes > input_capacity) {
+      uint8_t *grown = realloc(input, bytes);
+      if (!grown) {
+        sceKernelUnlockLwMutex(&o->bq_lock, 1);
+        L_ERROR("opensl: PCM staging allocation failed (%u bytes)", (unsigned)bytes);
+        o->quit = 1;
+        break;
+      }
+      input = grown;
+      input_capacity = bytes;
+    }
+    memcpy(input, o->bq[o->bq_head].buf, bytes);
+    unsigned buffer_generation = o->bq_generation;
+    sceKernelUnlockLwMutex(&o->bq_lock, 1);
+    const uint8_t *buf = input;
+    int frames = bytes / in_frame_bytes;
+    int peak = 0;
+    unsigned clipped = 0;
+    for (int f = 0; f < frames && !o->quit; f++) {
       const int16_t *s = (const int16_t *)(buf + f * in_frame_bytes);
       int16_t cur[2] = {s[0], o->channels > 1 ? s[1] : s[0]};
-      while (phase < 0x10000) {
-        // 15-bit weight: (cur - prev) spans up to 65535, so a 16-bit weight
-        // would overflow int32 and turn into noise.
-        int32_t w = phase >> 1;
-        out[out_frames * 2] = prev[0] + (((cur[0] - prev[0]) * w) >> 15);
-        out[out_frames * 2 + 1] = prev[1] + (((cur[1] - prev[1]) * w) >> 15);
-        if (++out_frames == SL_GRAIN) {
-          if (o->port >= 0)
-            sceAudioOutOutput(o->port, out);
-          out_frames = 0;
-        }
-        phase += step;
+      {
+        int a = abs((int)cur[0]), b = abs((int)cur[1]);
+        if (a > peak) peak = a;
+        if (b > peak) peak = b;
+        if (a >= 32760) clipped++;
+        if (b >= 32760) clipped++;
       }
-      phase -= 0x10000;
+      if (o->rate == port_rate) {
+        // Native-frequency output preserves every source sample exactly.
+        out[out_frames * 2] = cur[0];
+        out[out_frames * 2 + 1] = cur[1];
+        if (++out_frames == SL_GRAIN) {
+          int rc = output_grain(o, out);
+          out_index ^= 1;
+          out = out_base + out_index * SL_GRAIN * 2;
+          out_frames = 0;
+          if (rc < 0) break;
+        }
+      } else {
+        while (phase < 0x10000) {
+          int32_t w = phase >> 1;
+          out[out_frames * 2] = prev[0] + (((cur[0] - prev[0]) * w) >> 15);
+          out[out_frames * 2 + 1] = prev[1] + (((cur[1] - prev[1]) * w) >> 15);
+          if (++out_frames == SL_GRAIN) {
+            int rc = output_grain(o, out);
+            out_index ^= 1;
+            out = out_base + out_index * SL_GRAIN * 2;
+            out_frames = 0;
+            if (rc < 0) break;
+          }
+          phase += step;
+        }
+        phase -= 0x10000;
+      }
       prev[0] = cur[0];
       prev[1] = cur[1];
     }
-    o->bq_head = (o->bq_head + 1) % BQ_MAX;
+    sceKernelLockLwMutex(&o->bq_lock, 1, NULL);
+    o->pcm_samples += (uint64_t)frames * 2;
+    o->pcm_clipped += clipped;
+    if (peak > o->pcm_peak) o->pcm_peak = peak;
+    if (peak) o->pcm_nonzero++;
+    ++o->buffers_seen;
+    if (peak && !o->heard_pcm) {
+      o->heard_pcm = 1;
+      L_INFO("opensl: port %d first nonzero PCM peak %d buffer %u volume %d", o->port, peak, o->buffers_seen, vol);
+    } else if (o->buffers_seen == 512 && !o->heard_pcm) {
+      L_WARN("opensl: port %d received 512 silent buffers", o->port);
+    }
+    if (buffer_generation != o->bq_generation) {
+      // Clear already returned this buffer; do not consume a newly enqueued
+      // one or deliver an obsolete completion callback.
+      sceKernelUnlockLwMutex(&o->bq_lock, 1);
+      out_frames = 0;
+      continue;
+    }
+    o->bq_head = (o->bq_head + 1) % o->bq_capacity;
     o->bq_play_index++;
-    __sync_fetch_and_sub(&o->bq_count, 1);
-    if (o->cb)
-      o->cb(&o->bq_itf, o->cb_ctx);
+    o->frames_played += frames;
+    o->bq_count--;
+    sl_bq_callback cb = o->cb;
+    void *ctx = o->cb_ctx;
+    sceKernelUnlockLwMutex(&o->bq_lock, 1);
+    if (cb && !o->quit) cb(&o->bq_itf, ctx);
   }
-  free(out);
-  return sceKernelExitDeleteThread(0);
+  if (o->port >= 0) sceAudioOutOutput(o->port, NULL); // drain before freeing queued PCM
+  free(input);
+  free(out_base);
+  return 0;  // joined and deleted by obj_Destroy
 }
 
 static SLresult engine_CreateAudioPlayer(void *self, void *out, SLDataSource *src, void *snk, SLuint32 n,
                                          const void *ids, const void *req) {
   SLDataFormat_PCM *fmt = src ? src->pFormat : NULL;
-  if (!fmt || fmt->formatType != SL_DATAFORMAT_PCM || fmt->bitsPerSample != 16) {
+  if (!fmt || fmt->formatType != SL_DATAFORMAT_PCM || fmt->bitsPerSample != 16 ||
+      (fmt->numChannels != 1 && fmt->numChannels != 2) || fmt->samplesPerSec < 1000000) {
     L_ERROR("opensl: unsupported source format");
     return SL_RESULT_PARAMETER_INVALID;
   }
+  const SLuint32 *locator = src->pLocator;
+  SLuint32 capacity = locator ? locator[1] : BQ_MAX;
+  if (!capacity || capacity > 1024) return SL_RESULT_PARAMETER_INVALID;
   sl_object *o = calloc(1, sizeof(sl_object));
+  if (!o) return 3; // SL_RESULT_MEMORY_FAILURE
+  o->bq_capacity = capacity;
+  o->bq = calloc(capacity, sizeof(*o->bq));
+  if (!o->bq) { free(o); return 3; }
+  int lock_rc = sceKernelCreateLwMutex(&o->bq_lock, "sl_queue", 0, 0, NULL);
+  if (lock_rc < 0) { free(o->bq); free(o); return 4; }
   o->obj_itf = &object_vtbl;
   o->play_itf = &play_vtbl;
   o->bq_itf = &bq_vtbl;
@@ -374,14 +530,43 @@ static SLresult engine_CreateAudioPlayer(void *self, void *out, SLDataSource *sr
   o->rate = fmt->samplesPerSec / 1000;  // source rate (milliHz in OpenSL)
   o->bits = 16;
   o->play_state = SL_PLAYSTATE_STOPPED;
-  // MAIN ports only run at 48 kHz; player_thread resamples.
-  o->port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, SL_GRAIN, SL_PORT_RATE, SCE_AUDIO_OUT_MODE_STEREO);
+  // BGM ports accept 44.1 kHz directly, unlike MAIN's fixed 48 kHz.
+  // This avoids the software interpolation that attenuated high frequencies.
+  o->output_rate = vita_rate(o->rate);
+  o->port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, SL_GRAIN, o->output_rate, SCE_AUDIO_OUT_MODE_STEREO);
+  if (o->port >= 0) {
+    sceAudioOutSetAlcMode(SCE_AUDIO_ALC_OFF);
+    L_INFO("opensl: native-frequency BGM output %d Hz", o->output_rate);
+  } else {
+    L_WARN("opensl: BGM port unavailable 0x%X; using MAIN resampling", o->port);
+    o->output_rate = SL_PORT_RATE;
+    o->port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, SL_GRAIN, o->output_rate, SCE_AUDIO_OUT_MODE_STEREO);
+  }
   if (o->port < 0)
     L_ERROR("opensl: sceAudioOutOpenPort failed 0x%08X", o->port);
   o->sema = sceKernelCreateSema("sl_player", 0, 0, 1024, NULL);
-  o->thread = sceKernelCreateThread("sl_player", player_thread, 0x10000100 - 10, 0x10000, 0, 0, NULL);
-  sceKernelStartThread(o->thread, sizeof(o), &o);
-  L_INFO("opensl: player %d ch %d Hz (port %d)", o->channels, o->rate, o->port);
+  o->thread = sceKernelCreateThread("sl_player", player_thread, 0x10000100 - 10, 0x10000, 0, thread_cpu_mask(), NULL);
+  int start_rc = (o->port < 0 || o->sema < 0 || o->thread < 0) ? -1 : sceKernelStartThread(o->thread, sizeof(o), &o);
+  if (o->port < 0 || o->sema < 0 || start_rc < 0) {
+    L_ERROR("opensl: player resources failed port 0x%X sema 0x%X thread 0x%X start 0x%X", o->port, o->sema, o->thread, start_rc);
+    // A successfully started consumer must be stopped before freeing it.
+    if (start_rc >= 0) {
+      o->quit = 1;
+      sceKernelSignalSema(o->sema, 1);
+      sceKernelWaitThreadEnd(o->thread, NULL, NULL);
+    }
+    if (o->thread >= 0) sceKernelDeleteThread(o->thread);
+    if (o->sema >= 0) sceKernelDeleteSema(o->sema);
+    if (o->port >= 0) sceAudioOutReleasePort(o->port);
+    sceKernelDeleteLwMutex(&o->bq_lock);
+    free(o->bq); free(o);
+    return 4; // SL_RESULT_RESOURCE_ERROR
+  }
+  L_INFO("opensl: player %d ch %d Hz (port %d, queue %d buffers)", o->channels, o->rate, o->port, o->bq_capacity);
+  sceKernelLockLwMutex(&players_lock, 1, NULL);
+  o->next_player = players;
+  players = o;
+  sceKernelUnlockLwMutex(&players_lock, 1);
   *(void **)out = &o->obj_itf;
   return SL_RESULT_SUCCESS;
 }
@@ -417,15 +602,13 @@ SLresult slCreateEngine_bridge(void *out, SLuint32 n, const void *opts, SLuint32
 #define FMOD_INFO_DSPNUMBUFFERS 2
 #define FMOD_INFO_MIXERRUNNING 3
 
-extern void *jni_get_env(void);
-extern void *jni_new_direct_buffer(void *addr, int64_t capacity);
 
 static SceUID fmod_thread_id = -1;
 static volatile int fmod_quit;
 
 static int fmod_thread(SceSize args, void *argp) {
-  int (*getInfo)(void *, void *, int) = (void *)so_symbol_global("Java_org_fmod_FMODAudioDevice_fmodGetInfo");
-  int (*process)(void *, void *, void *) = (void *)so_symbol_global("Java_org_fmod_FMODAudioDevice_fmodProcess");
+  int (*getInfo)(void *, void *, int) = jni_find_native("org/fmod/FMODAudioDevice", "fmodGetInfo");
+  int (*process)(void *, void *, void *) = jni_find_native("org/fmod/FMODAudioDevice", "fmodProcess");
   if (!getInfo || !process) {
     L_ERROR("fmod: JNI entry points not found");
     return sceKernelExitDeleteThread(0);
@@ -475,7 +658,7 @@ void audio_fmod_start(void) {
   if (fmod_thread_id >= 0)
     return;
   fmod_quit = 0;
-  fmod_thread_id = sceKernelCreateThread("fmod_device", fmod_thread, 0x10000100 - 10, 0x40000, 0, 0, NULL);
+  fmod_thread_id = sceKernelCreateThread("fmod_device", fmod_thread, 0x10000100 - 10, 0x40000, 0, thread_cpu_mask(), NULL);
   sceKernelStartThread(fmod_thread_id, 0, NULL);
 }
 
@@ -484,4 +667,30 @@ void audio_fmod_stop(void) {
   fmod_thread_id = -1;
 }
 
-void audio_init(void) {}
+void audio_init(void) {
+  sceKernelCreateLwMutex(&players_lock, "sl_players", 0, 0, NULL);
+}
+
+void audio_diagnostics(void) {
+  // This is CRI's own error buffer, which its Unity component can leave
+  // unreported. It is a read-only query and does not clear the error.
+  const char *(*first_error)(void) = (void *)so_symbol_global("criWareUnity_GetFirstError");
+  if (first_error) {
+    const char *error = first_error();
+    if (error && *error) L_WARN("cri: first error: %.700s", error);
+  }
+  sceKernelLockLwMutex(&players_lock, 1, NULL);
+  for (sl_object *o = players; o; o = o->next_player) {
+    sceKernelLockLwMutex(&o->bq_lock, 1, NULL);
+    L_INFO("audio: port %d state %u queue %d/%d enqueued %u consumed %u audible %d callback %d", o->port,
+      o->play_state, o->bq_count, o->bq_capacity, o->enqueued, o->buffers_seen, o->heard_pcm, o->cb != NULL);
+    L_INFO("audio: port %d PCM window peak %d nonzero buffers %u clipped %llu/%llu output %d Hz", o->port,
+      o->pcm_peak, o->pcm_nonzero, (unsigned long long)o->pcm_clipped,
+      (unsigned long long)o->pcm_samples, o->output_rate);
+    o->pcm_peak = 0;
+    o->pcm_nonzero = 0;
+    o->pcm_samples = o->pcm_clipped = 0;
+    sceKernelUnlockLwMutex(&o->bq_lock, 1);
+  }
+  sceKernelUnlockLwMutex(&players_lock, 1);
+}

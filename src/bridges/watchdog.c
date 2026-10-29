@@ -4,6 +4,7 @@
 // show up in the log when no thread is left to report them.
 
 #include "bridges.h"
+#include "../util/work_trace.h"
 #include "../loader/so_util.h"
 #include "../util/log.h"
 
@@ -19,6 +20,7 @@ typedef struct {
   const void *volatile obj;
   volatile uintptr_t caller;
   volatile int waiting;
+  uint64_t perf_start;
 } wait_note;
 
 static wait_note notes[MAX_NOTES];
@@ -42,6 +44,7 @@ static wait_note *my_note(void) {
 void thread_wait_begin(const char *where, const void *obj, uintptr_t caller) {
   wait_note *n = my_note();
   if (n) {
+    n->perf_start = work_trace_begin();
     n->where = where;
     n->obj = obj;
     n->caller = caller;
@@ -51,8 +54,11 @@ void thread_wait_begin(const char *where, const void *obj, uintptr_t caller) {
 
 void thread_wait_end(void) {
   wait_note *n = my_note();
-  if (n)
+  if (n) {
+    work_trace_end(WORK_WAIT, n->perf_start, 0, n->caller);
+    n->perf_start = 0;
     n->waiting = 0;
+  }
 }
 
 static void describe(uintptr_t addr, char *buf, size_t size) {

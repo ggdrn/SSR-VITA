@@ -6,6 +6,7 @@
 
 typedef struct {
   char *name;
+  uint32_t data_offset_cache; // lazy internal cache; zero until header validated
   uint32_t local_offset;  // offset of the local file header
   uint32_t comp_size;
   uint32_t size;

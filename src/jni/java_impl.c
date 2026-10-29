@@ -8,6 +8,7 @@
 #include "../util/log.h"
 
 #include <stdio.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,6 +16,7 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 
 #include "../net/http.h"
 #include <psp2/system_param.h>
@@ -76,6 +78,14 @@ static jvalue unity_setSoftInputStr(jobj *self, const jvalue *a) {
   return RET_VOID;
 }
 static jvalue ret_null(jobj *self, const jvalue *a) { return RET_OBJ(NULL); }
+
+// CRI obtains the APK asset manager through the Activity before native
+// initialization. AAssetManager_fromJava uses this as an opaque handle.
+static jvalue ctx_getAssets(jobj *self, const jvalue *a) {
+  static jobj *assets;
+  if (!assets) assets = jni_new_object("android/content/res/AssetManager");
+  return RET_OBJ(assets);
+}
 
 // --- Display ----------------------------------------------------------------
 
@@ -509,8 +519,57 @@ static jvalue hashmap_size(jobj *self, const jvalue *a) { return RET_INT(map_of(
 #define WWW_CLASS "com/unity3d/player/WWW"
 #define WWW_CHUNK 16384
 
+// The native WWW id is a pointer owned by Unity. Its destructor waits for
+// Java Thread.join before freeing it; returning early permits callbacks into
+// a destroyed request. Keep a small state alive for owner, worker and joiners.
 typedef struct {
-  int id;
+  unsigned refs, done, cancelled;
+  SceUID thread_id;
+} www_lifetime;
+static pthread_mutex_t www_life_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void www_life_release(www_lifetime *life) {
+  pthread_mutex_lock(&www_life_lock);
+  int last = --life->refs == 0;
+  pthread_mutex_unlock(&www_life_lock);
+  if (last) free(life);
+}
+
+static jvalue www_join(jobj *self, const jvalue *a) {
+  if (!self || !self->cls || strcmp(self->cls, WWW_CLASS)) return RET_VOID;
+  pthread_mutex_lock(&www_life_lock);
+  www_lifetime *life = self->native;
+  if (life) life->refs++;
+  pthread_mutex_unlock(&www_life_lock);
+  if (!life) return RET_VOID;
+  if (!__atomic_load_n(&life->done, __ATOMIC_ACQUIRE) &&
+      __atomic_load_n(&life->thread_id, __ATOMIC_ACQUIRE) == sceKernelGetThreadId()) {
+    // A callback may dispose its own request. Do not deadlock this worker,
+    // and prohibit further native callbacks after that disposal returns.
+    __atomic_store_n(&life->cancelled, 1, __ATOMIC_RELEASE);
+    www_life_release(life);
+    return RET_VOID;
+  }
+  uint64_t start = sceKernelGetProcessTimeWide();
+  while (!__atomic_load_n(&life->done, __ATOMIC_ACQUIRE)) {
+    signal_poll();
+    sceKernelDelayThread(5000);
+  }
+  pthread_mutex_lock(&www_life_lock);
+  if (self->native == life) {
+    self->native = NULL;
+    life->refs--; // Detach the Java owner's reference once, after completion.
+  }
+  pthread_mutex_unlock(&www_life_lock);
+  uint64_t elapsed = sceKernelGetProcessTimeWide() - start;
+  if (elapsed > 500000) L_INFO("www: join waited %u ms for callbacks to finish", (unsigned)(elapsed / 1000));
+  www_life_release(life);
+  return RET_VOID;
+}
+
+typedef struct {
+  int id, aborted;
+  www_lifetime *life;
   char *url;
   uint8_t *body;
   size_t body_len;
@@ -526,9 +585,10 @@ typedef struct {
 } www_request;
 
 static int www_send_header(www_request *r, const char *text) {
-  if (!r->header_cb)
-    return 1;
-  return !r->header_cb(r->env, r->cls, r->id, jni_new_string(text));
+  if (__atomic_load_n(&r->life->cancelled, __ATOMIC_ACQUIRE)) { r->aborted = 1; return 0; }
+  if (!r->header_cb) return 1;
+  if (r->header_cb(r->env, r->cls, r->id, jni_new_string(text))) { r->aborted = 1; return 0; }
+  return 1;
 }
 
 static int www_on_status(void *user, int code, const char *line) {
@@ -548,10 +608,13 @@ static int www_on_data(void *user, const uint8_t *data, size_t len, size_t recei
   if (!r->read_cb)
     return 1;
   while (len) {
+    if (__atomic_load_n(&r->life->cancelled, __ATOMIC_ACQUIRE)) { r->aborted = 1; return 0; }
     size_t n = len < WWW_CHUNK ? len : WWW_CHUNK;
     memcpy(r->chunk->arr.data, data, n);
-    if (r->read_cb(r->env, r->cls, r->id, r->chunk, (int)n))
+    if (r->read_cb(r->env, r->cls, r->id, r->chunk, (int)n)) {
+      r->aborted = 1;
       return 0;  // Unity aborted (WWW disposed)
+    }
     data += n;
     len -= n;
   }
@@ -560,6 +623,7 @@ static int www_on_data(void *user, const uint8_t *data, size_t len, size_t recei
 
 static int www_thread(SceSize args, void *argp) {
   www_request *r = *(www_request **)argp;
+  __atomic_store_n(&r->life->thread_id, sceKernelGetThreadId(), __ATOMIC_RELEASE);
   r->env = jni_get_env();
   r->cls = jni_find_class(WWW_CLASS);
   r->header_cb = jni_find_native(WWW_CLASS, "headerCallback");
@@ -572,19 +636,17 @@ static int www_thread(SceSize args, void *argp) {
   char err[256] = "";
   const char *method = r->body ? "POST" : "GET";
   int code = http_request(method, r->url, r->headers, r->num_headers, r->body, r->body_len, &cb, err, sizeof(err));
-  if (code < 0) {
-    L_WARN("www: %s %s failed: %s", method, r->url, err);
-    if (r->error_cb)
-      r->error_cb(r->env, r->cls, r->id, jni_new_string(err));
-  } else if (code >= 400) {
-    // HttpURLConnection reports HTTP errors through WWW.error as well.
-    char msg[64];
-    snprintf(msg, sizeof(msg), "%d", code);
-    if (r->error_cb)
-      r->error_cb(r->env, r->cls, r->id, jni_new_string(msg));
+  if (!__atomic_load_n(&r->life->cancelled, __ATOMIC_ACQUIRE)) {
+    if (code < 0 || code >= 400 || r->aborted) {
+      char message[256];
+      if (r->aborted) snprintf(message, sizeof(message), "request aborted");
+      else if (code < 0) snprintf(message, sizeof(message), "%s", err);
+      else snprintf(message, sizeof(message), "%d", code);
+      if (r->error_cb) r->error_cb(r->env, r->cls, r->id, jni_new_string(message));
+    } else if (r->done_cb) {
+      r->done_cb(r->env, r->cls, r->id);
+    }
   }
-  if (r->done_cb)
-    r->done_cb(r->env, r->cls, r->id);
 
   free(r->url);
   free(r->body);
@@ -592,12 +654,31 @@ static int www_thread(SceSize args, void *argp) {
     free((void *)r->headers[i].name);
     free((void *)r->headers[i].value);
   }
+  www_lifetime *life = r->life;
   free(r);
+  __atomic_store_n(&life->done, 1, __ATOMIC_RELEASE);
+  www_life_release(life);
   return sceKernelExitDeleteThread(0);
 }
 
 static jvalue www_init(jobj *self, const jvalue *a) {
   www_request *r = calloc(1, sizeof(*r));
+  www_lifetime *life = calloc(1, sizeof(*life));
+  if (!r || !life) {
+    free(r); free(life);
+    L_ERROR("www: cannot allocate request state");
+    // Report failure without allocating another Java string in an OOM path.
+    static jobj message = {.magic = JOBJ_MAGIC, .kind = JO_STRING,
+      .cls = "java/lang/String", .str = {.utf8 = "cannot allocate network request"}};
+    void (*error_cb)(void *, jobj *, int, jobj *) = jni_find_native(WWW_CLASS, "errorCallback");
+    if (error_cb) error_cb(jni_get_env(), jni_find_class(WWW_CLASS), a[0].i, &message);
+    return RET_VOID;
+  }
+  life->refs = 2; // Java owner + worker, established before thread start.
+  r->life = life;
+  pthread_mutex_lock(&www_life_lock);
+  self->native = life;
+  pthread_mutex_unlock(&www_life_lock);
   r->id = a[0].i;
   r->url = strdup(jni_string_utf8(a[1].l));
   jobj *post = a[2].l;
@@ -615,7 +696,19 @@ static jvalue www_init(jobj *self, const jvalue *a) {
   L_INFO("www: %s %s (%u bytes, %d headers)", r->body ? "POST" : "GET", r->url, (unsigned)r->body_len,
          r->num_headers);
   // mbedTLS handshakes need a roomy stack (net_start_thread gives 256 KB).
-  net_start_thread("www", www_thread, sizeof(r), &r);
+  int started = net_start_thread("www", www_thread, sizeof(r), &r);
+  if (started < 0) {
+    L_ERROR("www: network thread failed 0x%08X", started);
+    // A synchronous error callback may itself dispose the request.
+    __atomic_store_n(&life->thread_id, sceKernelGetThreadId(), __ATOMIC_RELEASE);
+    void (*error_cb)(void *, jobj *, int, jobj *) = jni_find_native(WWW_CLASS, "errorCallback");
+    if (error_cb) error_cb(jni_get_env(), jni_find_class(WWW_CLASS), r->id, jni_new_string("network thread unavailable"));
+    free(r->url); free(r->body);
+    for (int i = 0; i < r->num_headers; i++) { free((void *)r->headers[i].name); free((void *)r->headers[i].value); }
+    free(r);
+    __atomic_store_n(&life->done, 1, __ATOMIC_RELEASE);
+    www_life_release(life);
+  }
   return RET_VOID;
 }
 
@@ -649,6 +742,7 @@ void java_impl_init(void) {
   jni_register_method(NULL, "getExternalStorageDirectory", NULL, env_getExternalStorageDirectory);
   jni_register_method(NULL, "getExternalStorageState", NULL, env_getExternalStorageState);
   jni_register_method(NULL, "getApplicationInfo", NULL, ctx_getApplicationInfo);
+  jni_register_method(NULL, "getAssets", "()Landroid/content/res/AssetManager;", ctx_getAssets);
   jni_register_method(NULL, "getSharedPreferences", NULL, ctx_getSharedPreferences);
   jni_register_method("java/io/File", "getPath", NULL, file_getPath);
   jni_register_method("java/io/File", "getAbsolutePath", NULL, file_getPath);
@@ -701,7 +795,8 @@ void java_impl_init(void) {
   jni_register_method("java/util/Locale", "getDefault", NULL, locale_getDefault);
   jni_register_method("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", integer_parseInt);
   jni_register_method("com/unity3d/player/WWW", "<init>", NULL, www_init);
-  jni_register_method(NULL, "join", "()V", ret_void);  // WWW.join(): our thread needs no joining
+  jni_register_method(WWW_CLASS, "join", "()V", www_join);
+  jni_register_method(NULL, "join", "()V", www_join); // inherited Thread.join lookup
   jni_register_method("java/util/HashMap", "put", NULL, hashmap_put);
   jni_register_method("java/util/HashMap", "get", NULL, hashmap_get);
   jni_register_method("java/util/HashMap", "size", NULL, hashmap_size);

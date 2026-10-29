@@ -10,12 +10,15 @@ if [ "$1" != "--rebuild" ]; then
 fi
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-if ! cmake --build build -j8 2>&1 | tee build/last_build.log; then
-  exit 1
-fi
-# vita-elf-create fails when text ends within ~4 KB of the data segment; pad
-# the text segment and retry (see src/text_pad.c).
-if grep -q "Cannot allocate .* SCE data at end of segment" build/last_build.log; then
+if cmake --build build -j8 > build/last_build.log 2>&1; then
+  cat build/last_build.log
+else
+  cat build/last_build.log
+  # vita-elf-create sometimes needs extra text padding. All other failures
+  # stop here, so a stale package can never be copied as a successful build.
+  if ! grep -q "Cannot allocate .* SCE data at end of segment" build/last_build.log; then
+    exit 1
+  fi
   pad=$(sed -n 's/^SRR_TEXT_PAD:STRING=//p' build/CMakeCache.txt)
   pad=$(( ${pad:-0} == 0 ? 8192 : 0 ))
   echo "Retrying with SRR_TEXT_PAD=$pad"

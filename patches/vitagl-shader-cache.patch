@@ -1,0 +1,197 @@
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index 1d410cb..e521260 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -663,6 +663,7 @@ void *serialize_shader(void *out, size_t *sz, shader *s, GLboolean save_bindings
+ 	void *_out = out;
+ 	if (!_out) {
+ 		_out = vglMalloc(*sz);
++		if (!_out) return NULL;
+ 	}
+ 	uint8_t *buf = (uint8_t *)_out;
+ 	vgl_fast_memcpy(buf, &matrix_uniforms_num, sizeof(uint32_t));
+@@ -724,6 +725,59 @@ void unserialize_shader(void *in, size_t sz, shader *s, GLboolean load_bindings)
+ 	}
+ }
+ 
++#ifdef HAVE_SHADER_CACHE
++// Optional application diagnostics: 0 hit, 1 miss, 2 saved, 3 I/O error,
++// 4 actual compiler invocation. No dependency on an application's logger.
++void vgl_shader_cache_event(unsigned event) __attribute__((weak));
++static void shader_cache_event(unsigned event) {
++  if (vgl_shader_cache_event) vgl_shader_cache_event(event);
++}
++static GLboolean load_cached_shader(const char *fname, shader *s, GLboolean bindings) {
++  SceUID fd = sceIoOpen(fname, SCE_O_RDONLY, 0777);
++  if (fd < 0) { shader_cache_event(1); return GL_FALSE; }
++  SceOff len = sceIoLseek(fd, 0, SCE_SEEK_END);
++  void *buf = NULL;
++  GLboolean valid = GL_FALSE;
++  GLboolean corrupt = len < 32 || len > 1024 * 1024;
++  // Bound native allocation and reject interrupted/short writes before the
++  // unserializer walks variable-length uniform metadata.
++  if (len >= 32 && len <= 1024 * 1024 && sceIoLseek(fd, 0, SCE_SEEK_SET) >= 0) {
++    buf = vglMalloc((size_t)len);
++    if (buf && sceIoRead(fd, buf, (size_t)len) == len) {
++      uint32_t matrices;
++      memcpy(&matrices, buf, sizeof(matrices));
++      size_t prefix = 4 + (size_t)matrices * 4;
++      if (matrices <= 4096 && prefix <= (size_t)len) {
++        if (bindings) prefix += sizeof(binds_map);
++#ifdef HAVE_GLSL_TEXTURE_SIZE
++        if (prefix < (size_t)len) {
++          unsigned samplers = ((uint8_t *)buf)[prefix++];
++          if (samplers <= SCE_GXM_MAX_TEXTURE_UNITS) prefix += samplers * sizeof(glsl_samplers_info);
++          else prefix = (size_t)len;
++        }
++#endif
++        if (prefix <= (size_t)len && (size_t)len - prefix >= 32) {
++          uint8_t *gxp = (uint8_t *)buf + prefix;
++          uint32_t program_size;
++          memcpy(&program_size, gxp + 8, sizeof(program_size));
++          if (!memcmp(gxp, "GXP", 4) && program_size >= 32 && program_size <= (size_t)len - prefix) valid = GL_TRUE;
++        }
++      }
++      corrupt = !valid;
++    }
++  }
++  sceIoClose(fd);
++  if (valid) {
++    unserialize_shader(buf, (size_t)len, s, bindings);
++    valid = s->prog != NULL;
++  }
++  vgl_free(buf);
++  if (valid) shader_cache_event(0);
++  else { shader_cache_event(3); shader_cache_event(1); if (corrupt) sceIoRemove(fname); }
++  return valid;
++}
++#endif
++
+ #ifdef HAVE_SHADER_CACHE
+ #define vgl_compile_shader(shd, sv) compile_shader(shd, sv, fname, fname_len)
+ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLboolean save_bindings, char *cache_fname, int fname_len) {
+@@ -732,6 +786,9 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
+ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLboolean save_bindings) {
+ #endif
+ 	// Compiling shader source
++#ifdef HAVE_SHADER_CACHE
++	shader_cache_event(4);
++#endif
+ 	s->prog = shark_compile_shader_extended((const char *)s->source, &s->size, s->type == GL_FRAGMENT_SHADER ? SHARK_FRAGMENT_SHADER : SHARK_VERTEX_SHADER, compiler_opts, compiler_fastmath, compiler_fastprecision, compiler_fastint);
+ 	if (s->prog) {
+ 		vgl_free(s->source);
+@@ -777,11 +834,21 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
+ 	cache_fname[fname_len - 21] = 0;
+ 	sceIoMkdir(cache_fname, 0777);
+ 	cache_fname[fname_len - 21] = '/';
+-	SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
++	// Publish only complete files. A shutdown during compilation must not
++	// leave a truncated .gxp that the next run treats as a cache hit.
++	char temporary[272];
++	snprintf(temporary, sizeof(temporary), "%s.tmp", cache_fname);
+ 	size_t sz;
+ 	void *buf = serialize_shader(NULL, &sz, s, save_bindings);
+-	sceIoWrite(f, buf, sz);
+-	sceIoClose(f);
++	SceUID f = buf ? sceIoOpen(temporary, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777) : -1;
++	GLboolean saved = GL_FALSE;
++	if (f >= 0) {
++		int wrote = sceIoWrite(f, buf, sz);
++		int closed = sceIoClose(f);
++		if (wrote == sz && closed >= 0 && sceIoRename(temporary, cache_fname) >= 0) saved = GL_TRUE;
++	}
++	if (!saved) sceIoRemove(temporary);
++	shader_cache_event(saved ? 2 : 3);
+ 	vgl_free(buf);
+ #endif
+ }
+@@ -2007,17 +2074,9 @@ void glCompileShader(GLuint handle) {
+ 	uint64_t hash = XXH3_64bits(s->source, s->size);
+ 	uint8_t subdir_hash = hash >> 56;
+ 	int fname_len = sprintf(fname, "%s/%s/%02X/%016llX.gxp", vgl_shader_cache_path, s->type == GL_VERTEX_SHADER ? "v" : "f", subdir_hash, hash);
+-	SceUID f = sceIoOpen(fname, SCE_O_RDONLY, 0777);
+-	if (f >= 0) {
++	if (load_cached_shader(fname, s, GL_FALSE)) {
+ 		vgl_free(s->source);
+ 		s->source = NULL;
+-		size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
+-		sceIoLseek(f, 0, SCE_SEEK_SET);
+-		void *buf = vglMalloc(sz);
+-		sceIoRead(f, buf, sz);
+-		sceIoClose(f);
+-		unserialize_shader(buf, sz, s, GL_FALSE);
+-		vgl_free(buf);
+ 		return;
+ 	}
+ #endif
+@@ -2394,31 +2453,13 @@ void glLinkProgram(GLuint progr) {
+ 			uint64_t hash = XXH3_64bits(p->vshader->source, p->vshader->size);
+ 			uint8_t subdir_hash = hash >> 56;
+ 			fname_len = sprintf(vert_fname, "%s/v/%02X/%016llX.gxp", vgl_shader_cache_path, subdir_hash, hash);
+-			SceUID f = sceIoOpen(vert_fname, SCE_O_RDONLY, 0777);
+-			if (f >= 0) {
+-				size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
+-				sceIoLseek(f, 0, SCE_SEEK_SET);
+-				void *buf = vglMalloc(sz);
+-				sceIoRead(f, buf, sz);
+-				sceIoClose(f);
+-				unserialize_shader(buf, sz, p->vshader, GL_TRUE);
+-				vgl_free(buf);
+-			}
++			load_cached_shader(vert_fname, p->vshader, GL_TRUE);
+ 		}
+ 		if (!p->fshader->prog) {
+ 			uint64_t hash = XXH3_64bits(p->fshader->source, p->fshader->size);
+ 			uint8_t subdir_hash = hash >> 56;
+ 			fname_len = sprintf(frag_fname, "%s/f/%02X/%016llX.gxp", vgl_shader_cache_path, subdir_hash, hash);
+-			SceUID f = sceIoOpen(frag_fname, SCE_O_RDONLY, 0777);
+-			if (f >= 0) {
+-				size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
+-				sceIoLseek(f, 0, SCE_SEEK_SET);
+-				void *buf = vglMalloc(sz);
+-				sceIoRead(f, buf, sz);
+-				sceIoClose(f);
+-				unserialize_shader(buf, sz, p->fshader, GL_TRUE);
+-				vgl_free(buf);
+-			}
++			load_cached_shader(frag_fname, p->fshader, GL_TRUE);
+ 		}
+ #endif
+ 		if (!p->vshader->prog || !p->fshader->prog) {
+@@ -2438,6 +2479,13 @@ void glLinkProgram(GLuint progr) {
+ 				vgl_compile_shader(p->fshader, GL_TRUE);
+ 			}
+ 		}
++		// A shader that failed to translate/compile has no GXM program; linking
++		// would dereference it, so leave the program unlinked instead.
++		if (!p->vshader->prog || !p->fshader->prog) {
++			vgl_log("%s:%d: %s: %s shader failed to compile.\n", __FILE__, __LINE__, __func__, p->vshader->prog ? "fragment" : "vertex");
++			glsl_sema_mode = VGL_MODE_POSTPONED;
++			return;
++		}
+ 
+ 		// Setting progressive default attribute bindings
+ 		set_default_attrib_binding();
+diff --git a/source/vgl.c b/source/vgl.c
+index 6545672..3510a76 100644
+--- a/source/vgl.c
++++ b/source/vgl.c
+@@ -221,12 +221,12 @@ GLboolean vglInitWithCustomSizes(int pool_size, int width, int height, int ram_p
+ 	}
+ 	sceIoMkdir(shader_cache_root, 0777);
+ 	sprintf(vgl_shader_cache_path, "%s/v%d", shader_cache_root, SHADER_CACHE_MAGIC);
+-	if (!sceIoMkdir(vgl_shader_cache_path, 0777)) {
+-		int fname_len = sprintf(fname, "%s/v", vgl_shader_cache_path);
+-		sceIoMkdir(fname, 0777);
+-		fname[fname_len - 1] = 'f';
+-		sceIoMkdir(fname, 0777);
+-	}
++	sceIoMkdir(vgl_shader_cache_path, 0777);
++	// Repair a partial directory tree as well as create a new one.
++	int fname_len = sprintf(fname, "%s/v", vgl_shader_cache_path);
++	sceIoMkdir(fname, 0777);
++	fname[fname_len - 1] = 'f';
++	sceIoMkdir(fname, 0777);
+ #endif
+ 	// Check if framebuffer size is valid
+ 	GLboolean res_fallback = GL_FALSE;

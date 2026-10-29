@@ -23,6 +23,7 @@ else()
 endif()
 set(SRR_VERSION "0.0.${SRR_BUILD_2}")
 set(SRR_SFO_VERSION "00.${SRR_BUILD_2}")
+string(TIMESTAMP SRR_BUILD_STAMP "%Y%m%dT%H%M%SZ" UTC)
 configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 
 set(VITA_APP_NAME "Sonic Runners Revival")
@@ -51,6 +52,12 @@ add_executable(${PROJECT_NAME}
   src/mono_probe.c
   src/net/http.c
   src/net/ca_roots.c
+  src/util/observe.c
+  src/util/native_heap.c
+  src/util/work_trace.c
+  src/util/gc_trace.c
+  src/util/gc_policy.c
+  src/util/alloc_trace.c
   src/util/log.c
   src/util/apk.c
   src/loader/so_util.c

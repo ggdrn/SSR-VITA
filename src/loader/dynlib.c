@@ -308,7 +308,7 @@ extern void glStencilOpSeparate(void);
 extern void glTexImage2D_bridge(void);
 extern void glTexParameterf_sfp(void);
 extern void glTexParameteri_bridge(void);
-extern void glTexSubImage2D(void);
+extern void glTexSubImage2D_bridge(void);
 extern void glUniform1fv_bridge(void);
 extern void glUniform1i_bridge(void);
 extern void glUniform1iv_bridge(void);
@@ -877,7 +877,7 @@ const so_default_dynlib default_dynlib[] = {
   {"glTexImage2D", (uintptr_t)&glTexImage2D_bridge},
   {"glTexParameterf", (uintptr_t)&glTexParameterf_sfp},
   {"glTexParameteri", (uintptr_t)&glTexParameteri_bridge},
-  {"glTexSubImage2D", (uintptr_t)&glTexSubImage2D},
+  {"glTexSubImage2D", (uintptr_t)&glTexSubImage2D_bridge},
   {"glUniform1fv", (uintptr_t)&glUniform1fv_bridge},
   {"glUniform1i", (uintptr_t)&glUniform1i_bridge},
   {"glUniform1iv", (uintptr_t)&glUniform1iv_bridge},

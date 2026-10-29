@@ -12,6 +12,8 @@
 #include "../util/log.h"
 
 #include <malloc.h>
+#include <pthread.h>
+#include <vitaGL.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -118,6 +120,76 @@ static const char *bad_chunk(void *ptr) {
   return NULL;
 }
 
+// Large Unity allocations can fail in a fragmented newlib heap while the
+// mapped vitaGL pools still have room. Track ownership explicitly: pointers
+// borrowed from those pools must never reach newlib's free/realloc.
+#define UNITY_SPILL_SLOTS 32
+static struct { void *ptr, *base; size_t size, align; } unity_spill[UNITY_SPILL_SLOTS];
+static unsigned unity_spill_live;
+static pthread_mutex_t unity_spill_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int spill_info(void *ptr, size_t *size, size_t *align) {
+  if (!ptr || !__atomic_load_n(&unity_spill_live, __ATOMIC_ACQUIRE)) return 0;
+  int found = 0;
+  pthread_mutex_lock(&unity_spill_lock);
+  for (unsigned i = 0; i < UNITY_SPILL_SLOTS; i++) {
+    if (unity_spill[i].ptr == ptr && ptr) {
+      if (size) *size = unity_spill[i].size;
+      if (align) *align = unity_spill[i].align;
+      found = 1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&unity_spill_lock);
+  return found;
+}
+
+static int spill_free(void *ptr) {
+  if (!ptr || !__atomic_load_n(&unity_spill_live, __ATOMIC_ACQUIRE)) return 0;
+  int found = 0;
+  pthread_mutex_lock(&unity_spill_lock);
+  for (unsigned i = 0; i < UNITY_SPILL_SLOTS; i++) {
+    if (unity_spill[i].ptr == ptr && ptr) {
+      vglFree(unity_spill[i].base);
+      memset(&unity_spill[i], 0, sizeof(unity_spill[i]));
+      __atomic_sub_fetch(&unity_spill_live, 1, __ATOMIC_RELEASE);
+      found = 1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&unity_spill_lock);
+  return found;
+}
+
+static void *spill_alloc(size_t align, size_t size) {
+  if (size < 1024 * 1024 || !align || (align & (align - 1)) || align > 4096 || size > UINT32_MAX - align) return NULL;
+  static const vglMemType pools[] = {VGL_MEM_PHYCONT, VGL_MEM_RAM, VGL_MEM_VRAM};
+  void *result = NULL;
+  int pool = -1;
+  pthread_mutex_lock(&unity_spill_lock);
+  for (unsigned i = 0; i < UNITY_SPILL_SLOTS; i++) {
+    if (unity_spill[i].ptr) continue;
+    for (unsigned j = 0; j < sizeof(pools) / sizeof(pools[0]); j++) {
+      // vglAlloc tries only this pool, with no purge/wait or recursion into
+      // the guest allocator. Extra padding preserves memalign's alignment.
+      void *base = vglAlloc(size + align - 1, pools[j]);
+      if (!base) continue;
+      result = (void *)(((uintptr_t)base + align - 1) & ~(uintptr_t)(align - 1));
+      unity_spill[i].ptr = result;
+      unity_spill[i].base = base;
+      unity_spill[i].size = size;
+      unity_spill[i].align = align;
+      __atomic_add_fetch(&unity_spill_live, 1, __ATOMIC_RELEASE);
+      pool = pools[j];
+      break;
+    }
+    break;
+  }
+  pthread_mutex_unlock(&unity_spill_lock);
+  if (result) L_WARN("mem: recovered fragmented Unity allocation %u bytes align %u using mapped pool %d", size, align, pool);
+  return result;
+}
+
 static int bad_free_reports;
 
 static int reject_free(const char *what, void *ptr, void *caller) {
@@ -136,6 +208,7 @@ static int reject_free(const char *what, void *ptr, void *caller) {
 }
 
 void free_bridge(void *ptr) {
+  if (ptr && spill_free(ptr)) return;
   if (ptr && reject_free("free", ptr, __builtin_return_address(0)))
     return;
   free(ptr);
@@ -156,6 +229,17 @@ void *calloc_bridge(size_t n, size_t size) {
 }
 
 void *realloc_bridge(void *old, size_t size) {
+  size_t old_size, align;
+  if (old && spill_info(old, &old_size, &align)) {
+    if (!size) { spill_free(old); return NULL; }
+    if (size <= old_size) return old;
+    void *p = memalign(align, size);
+    if (!p) p = spill_alloc(align, size);
+    if (!p) { alloc_failed("realloc mapped", size, align, __builtin_return_address(0)); return NULL; }
+    memcpy(p, old, old_size);
+    spill_free(old);
+    return p;
+  }
   // The old block's contents can't be trusted, so start a fresh one.
   if (old && reject_free("realloc", old, __builtin_return_address(0)))
     old = NULL;
@@ -167,8 +251,11 @@ void *realloc_bridge(void *old, size_t size) {
 
 void *memalign_bridge(size_t align, size_t size) {
   void *p = memalign(align, size);
-  if (!p && size)
-    alloc_failed("memalign", size, align, __builtin_return_address(0));
+  if (!p && size >= 1024 * 1024) {
+    so_module *caller = so_module_at((uintptr_t)__builtin_return_address(0));
+    if (caller && !strcmp(caller->name, "libunity.so")) p = spill_alloc(align, size);
+  }
+  if (!p && size) alloc_failed("memalign", size, align, __builtin_return_address(0));
   return p;
 }
 

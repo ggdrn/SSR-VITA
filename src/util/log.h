@@ -4,6 +4,11 @@
 #include <stdarg.h>
 
 void log_init(void);
+void log_enable_buffered(void);
+void log_flush_pending(unsigned budget);
+void log_finish(void);
+unsigned log_dropped_records(void);
+unsigned log_storage_ms(void);
 void log_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void log_vprintf(const char *fmt, va_list ap);
 

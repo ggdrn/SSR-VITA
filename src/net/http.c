@@ -4,6 +4,7 @@
 // against the roots embedded in ca_roots.c.
 
 #define _GNU_SOURCE  // strcasestr
+#include "../util/observe.h"
 #include "http.h"
 #include "../bridges/bridges.h"
 #include "../util/log.h"
@@ -122,6 +123,7 @@ typedef struct conn_s {
   mbedtls_ssl_context ssl;
   uint8_t buf[8192];
   size_t pos, len;
+  uint64_t idle_since;
 } conn;
 
 static int sock_send(void *ctx, const unsigned char *buf, size_t len) {
@@ -266,7 +268,9 @@ int net_start_thread(const char *name, int (*entry)(SceSize, void *), SceSize ar
   }
   if (t < 0)
     return t;
-  return sceKernelStartThread(t, args, argp);
+  int started = sceKernelStartThread(t, args, argp);
+  if (started < 0) sceKernelDeleteThread(t);
+  return started;
 }
 
 // --- keep-alive pool ----------------------------------------------------------
@@ -274,30 +278,35 @@ int net_start_thread(const char *name, int (*entry)(SceSize, void *), SceSize ar
 // is heavy on the Cortex-A9. Idle connections are kept per host and reused.
 
 #define POOL_MAX 6
+#define POOL_IDLE_US (5ULL * 1000 * 1000)
 
 static struct conn_s *pool[POOL_MAX];
 
 static conn *pool_take(const char *host, int port, int tls) {
-  conn *c = NULL;
+  conn *c = NULL, *expired[POOL_MAX]; unsigned n_expired = 0;
+  uint64_t now = sceKernelGetProcessTimeWide();
   sceKernelLockLwMutex(&pool_lock, 1, NULL);
   for (int i = 0; i < POOL_MAX; i++) {
-    if (pool[i] && pool[i]->port == port && pool[i]->tls == tls && !strcmp(pool[i]->host, host)) {
-      c = pool[i];
-      pool[i] = NULL;
-      break;
-    }
+    conn *candidate = pool[i];
+    if (!candidate || candidate->port != port || candidate->tls != tls || strcmp(candidate->host, host)) continue;
+    if (now < candidate->idle_since || now - candidate->idle_since > POOL_IDLE_US) {
+      expired[n_expired++] = candidate; pool[i] = NULL;
+    } else if (!c) { c = candidate; pool[i] = NULL; }
   }
   sceKernelUnlockLwMutex(&pool_lock, 1);
+  for (unsigned i = 0; i < n_expired; i++) { conn_close(expired[i]); free(expired[i]); }
+  if (n_expired) L_INFO("http: retired %u idle keep-alive connections before sending request", n_expired);
   return c;
 }
 
 static void pool_put(conn *c) {
+  c->idle_since = sceKernelGetProcessTimeWide();
   conn *evicted = c;
   sceKernelLockLwMutex(&pool_lock, 1, NULL);
   for (int i = 0; i < POOL_MAX; i++) {
-    if (!pool[i]) {
+    if (!pool[i] || c->idle_since < pool[i]->idle_since || c->idle_since - pool[i]->idle_since > POOL_IDLE_US) {
+      evicted = pool[i];
       pool[i] = c;
-      evicted = NULL;
       break;
     }
   }
@@ -383,8 +392,8 @@ static int send_request(conn *c, const char *method, const url_parts *u, const h
   return r;
 }
 
-int http_request(const char *method, const char *url, const http_header *headers, int num_headers,
-                 const void *body, size_t body_len, const http_callbacks *cb, char *err, size_t err_size) {
+static int http_request_impl(const char *method, const char *url, const http_header *headers, int num_headers,
+                 const void *body, size_t body_len, const http_callbacks *cb, char *err, size_t err_size, uint64_t *observed_bytes) {
   char current[2048];
   strncpy(current, url, sizeof(current) - 1);
   current[sizeof(current) - 1] = 0;
@@ -539,9 +548,24 @@ int http_request(const char *method, const char *url, const http_header *headers
       pool_put(c);
     else
       conn_drop(c);
+    *observed_bytes += received;
     L_INFO("http: %s %s -> %d (%u bytes)", cur_method, current, code, (unsigned)received);
     return code;
   }
   snprintf(err, err_size, "too many redirects");
   return -1;
+}
+
+// Includes connection setup, server wait, redirects and body callbacks. Log
+// failures too; the previous response-only log could not measure network time.
+int http_request(const char *method, const char *url, const http_header *headers, int num_headers,
+                 const void *body, size_t body_len, const http_callbacks *cb, char *err, size_t err_size) {
+  uint64_t start = sceKernelGetProcessTimeWide();
+  uint64_t observed_bytes = 0;
+  int result = http_request_impl(method, url, headers, num_headers, body, body_len, cb, err, err_size, &observed_bytes);
+  char observed_name[512];
+  snprintf(observed_name, sizeof(observed_name), "%s %s", method, url);
+  observe_span(OBS_NETWORK, observed_name, start, observed_bytes, result, 0);
+  L_INFO("http: elapsed %u ms status %d %s %s", (unsigned)((sceKernelGetProcessTimeWide() - start) / 1000), result, method, url);
+  return result;
 }

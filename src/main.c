@@ -1,3 +1,4 @@
+#include "util/observe.h"
 // SRR Vita: Android so-loader for Sonic Runners Revival (Unity 4.7 / Mono).
 // The game folder holds only the original APK; native libraries are inflated
 // from it into memory at boot and linked against the Vita bridges.
@@ -97,7 +98,9 @@ static void load_libraries(void) {
     void *elf = apk_extract(e, &size);
     if (!elf)
       fatal_error("Could not extract %s (not enough memory?).", path);
+    uint64_t map_start = observe_now();
     int r = so_load(&modules[i], libraries[i], elf, size, 0);
+    observe_span(OBS_BOOT, libraries[i], map_start, size, r, 0);
     free(elf);
     if (r < 0)
       fatal_error("Could not load %s (error %d).\nSee " LOG_PATH, libraries[i], r);
@@ -118,7 +121,8 @@ static void load_libraries(void) {
 
 int main(void) {
   log_init();
-  L_INFO("SRR Vita " SRR_VERSION_STRING " (build %s)", __DATE__ " " __TIME__);
+  observe_init();
+  L_INFO("SRR Vita " SRR_VERSION_STRING " (build %s)", SRR_BUILD_STAMP);
   // The eboot is relocated at load time; this lets crash addresses be mapped
   // back to `nm build/srr_vita` (see scripts/parse_core.py).
   L_INFO("loader: main() at %p", (void *)main);
@@ -134,7 +138,9 @@ int main(void) {
   memset(&boot_param, 0, sizeof(boot_param));
   sceAppUtilInit(&init_param, &boot_param);
 
+  observe_mark("requirements.begin");
   check_requirements();
+  observe_mark("requirements.ready");
 
   char apk[256];
   if (find_apk(apk, sizeof(apk)) < 0)
@@ -142,9 +148,12 @@ int main(void) {
   if (apk_open(apk) < 0)
     fatal_error("Could not read %s.\nIs the APK complete?", apk);
 
+  observe_mark("apk.index.ready");
   fs_init(apk);
   proc_init();
   libc_bridge_init();
+  thread_cpu_init();
+  observe_start_writer();
   pthread_bridge_init();
   mem_init();
   signal_init();
@@ -157,13 +166,20 @@ int main(void) {
   log_free_memory("before libraries");
   watchdog_start();
   net_init();
+  observe_mark("libraries.begin");
   load_libraries();
+  observe_mark("libraries.ready");
   log_free_memory("after libraries");
+  observe_mark("graphics.begin");
   gl_bridge_init();
+  observe_mark("graphics.ready");
   log_free_memory("after vitaGL");
 
+  observe_mark("unity.begin");
   int r = unity_run();
+  observe_stop();
   L_INFO("game exited with %d", r);
+  log_finish();
   sceKernelExitProcess(0);
   return 0;
 }

@@ -4,6 +4,8 @@
 
 #include "apk.h"
 #include "log.h"
+#include "work_trace.h"
+#include "observe.h"
 
 #include <psp2/io/fcntl.h>
 #include <psp2/kernel/threadmgr.h>
@@ -21,9 +23,11 @@ static uint16_t rd16(const uint8_t *p) { return p[0] | (p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24); }
 
 static int pread_all(void *dst, uint32_t len, int64_t off) {
+  uint64_t start = work_trace_begin();
   sceKernelLockLwMutex(&apk_lock, 1, NULL);
   int r = sceIoPread(apk_fd, dst, len, off);
   sceKernelUnlockLwMutex(&apk_lock, 1);
+  work_trace_end(WORK_IO, start, r > 0 ? r : 0, (uintptr_t)__builtin_return_address(0));
   return r == (int)len ? 0 : -1;
 }
 
@@ -107,13 +111,22 @@ int apk_entry_count(void) { return num_entries; }
 const apk_entry *apk_entry_at(int idx) { return idx >= 0 && idx < num_entries ? &entries[idx] : NULL; }
 
 int64_t apk_data_offset(const apk_entry *e) {
+  // Entries returned by this module live in writable, calloc'd storage.
+  // Metadata stays constant; only this private memoized offset is published.
+  uint32_t *cache = (uint32_t *)&e->data_offset_cache;
+  uint32_t cached = __atomic_load_n(cache, __ATOMIC_ACQUIRE);
+  if (cached) return cached;
   uint8_t hdr[30];
   if (pread_all(hdr, 30, e->local_offset) < 0 || rd32(hdr) != 0x04034b50)
     return -1;
-  return (int64_t)e->local_offset + 30 + rd16(hdr + 26) + rd16(hdr + 28);
+  uint64_t offset = (uint64_t)e->local_offset + 30 + rd16(hdr + 26) + rd16(hdr + 28);
+  if (offset > UINT32_MAX) return -1;
+  __atomic_store_n(cache, (uint32_t)offset, __ATOMIC_RELEASE);
+  return offset;
 }
 
 void *apk_extract(const apk_entry *e, size_t *out_size) {
+  uint64_t observed_start = observe_now();
   int64_t off = apk_data_offset(e);
   if (off < 0)
     return NULL;
@@ -157,20 +170,24 @@ void *apk_extract(const apk_entry *e, size_t *out_size) {
   }
   if (out_size)
     *out_size = e->size;
+  observe_span(OBS_APK, e->name, observed_start, e->size, 0, 0);
   return out;
 
 fail:
+  observe_span(OBS_APK, e->name, observed_start, 0, -1, 0);
   free(out);
   return NULL;
 }
 
 int apk_read_stored(const apk_entry *e, uint32_t pos, void *dst, uint32_t len) {
+  uint64_t observed_start = observe_now();
   if (e->method != 0 || pos > e->size)
     return -1;
-  if (pos + len > e->size)
+  if (len > e->size - pos)
     len = e->size - pos;
   int64_t off = apk_data_offset(e);
   if (off < 0 || pread_all(dst, len, off + pos) < 0)
     return -1;
+  observe_span(OBS_APK, e->name, observed_start, len, 0, 0);
   return len;
 }

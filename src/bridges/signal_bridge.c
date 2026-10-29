@@ -2,8 +2,8 @@
 // Mono relies on SIGSEGV to turn null dereferences into NullReferenceException,
 // so CPU aborts are converted into a Linux-style siginfo/ucontext, the guest
 // handler runs, and the (possibly modified) registers are written back.
-// Asynchronous signals between threads (pthread_kill) have no Vita equivalent;
-// they are logged and acknowledged without delivery.
+// Cross-thread signals are queued and delivered cooperatively in blocking
+// bridges; this also implements Mono/Boehm GC suspension and restart.
 
 #include "bridges.h"
 #include "../loader/so_util.h"
@@ -123,8 +123,10 @@ int kill_bridge(int pid, int sig) {
 typedef struct {
   uint32_t thread;
   volatile uint32_t pending;  // bit n = signal n (signals < 32)
+  uint32_t active;           // currently executing handlers on this thread
   uint64_t queued_at;         // when the oldest pending signal was queued (us)
   int stale_warned;
+  SceUID wake;              // restart event for sigsuspend; zero until allocated
 } sig_slot;
 
 #define MAX_SIG_THREADS 128
@@ -140,8 +142,10 @@ static sig_slot *slot_for(uint32_t thread, int create) {
     if (!sig_slots[i].thread && !free_slot)
       free_slot = &sig_slots[i];
   }
-  if (create && free_slot)
+  if (create && free_slot) {
     free_slot->thread = thread;
+    free_slot->wake = sceKernelCreateSema("sig_wake", 0, 0, 1, NULL);
+  }
   return create ? free_slot : NULL;
 }
 
@@ -200,23 +204,26 @@ static void warn_stale(void) {
 static int deliver_pending(uint32_t mask) {
   if (!total_pending)
     return 0;
-  warn_stale();
   sceKernelLockLwMutex(&sig_lock, 1, NULL);
   sig_slot *slot = slot_for(self_id(), 0);
-  uint32_t todo = slot ? slot->pending & ~mask : 0;
-  if (todo) {
-    slot->pending &= ~todo;
-    total_pending -= __builtin_popcount(todo);
+  uint32_t todo = slot ? slot->pending & ~(mask | slot->active) : 0;
+  // A suspend handler waits inside sigsuspend for a later resume signal.
+  // Removing a whole batch here hid resume signals from that nested wait.
+  // Pick one signal only, with Boehm's SIGPWR stop before SIGXCPU resume.
+  int sig = todo & (1u << 30) ? 30 : (todo ? __builtin_ctz(todo) : 0);
+  uint32_t old_active = slot ? slot->active : 0;
+  if (sig) {
+    slot->pending &= ~(1u << sig);
+    slot->active |= 1u << sig;
+    total_pending--;
   }
   sceKernelUnlockLwMutex(&sig_lock, 1);
-  int n = 0;
-  for (int sig = 1; sig < 32; sig++) {
-    if (todo & (1u << sig)) {
-      deliver_now(sig);
-      n++;
-    }
-  }
-  return n;
+  if (!sig) return 0;
+  deliver_now(sig);
+  sceKernelLockLwMutex(&sig_lock, 1, NULL);
+  slot->active = old_active;
+  sceKernelUnlockLwMutex(&sig_lock, 1);
+  return 1;
 }
 
 int signal_pending_self(void) {
@@ -267,6 +274,9 @@ int pthread_kill_bridge(uint32_t target, int sig) {
     slot->pending |= 1u << sig;
     total_pending++;
   }
+  // The pending bit is the predicate. A binary semaphore only wakes the
+  // sleeper; coalesced wakeups and a wake before WaitSema are both safe.
+  if (slot && slot->wake > 0) sceKernelSignalSema(slot->wake, 1);
   sceKernelUnlockLwMutex(&sig_lock, 1);
   return slot ? 0 : 11;  // EAGAIN when the table is full
 }
@@ -284,8 +294,17 @@ int sigprocmask_bridge(int how, const uint32_t *set, uint32_t *old) {
 int sigsuspend_bridge(const uint32_t *mask) {
   uint32_t blocked = mask ? *mask << 1 : 0;
   WAIT_BEGIN("sigsuspend", mask);
-  while (!deliver_pending(blocked))
-    sceKernelDelayThread(100);
+  sceKernelLockLwMutex(&sig_lock, 1, NULL);
+  sig_slot *slot = slot_for(self_id(), 1);
+  SceUID wake = slot ? slot->wake : -1;
+  sceKernelUnlockLwMutex(&sig_lock, 1);
+  while (!deliver_pending(blocked)) {
+    // Suspended GC threads used to wake 10,000 times per second each.
+    // Wait for an actual signal; the timeout keeps allocation failure safe.
+    SceUInt timeout = 5000;
+    if (wake > 0) sceKernelWaitSema(wake, 1, &timeout);
+    else sceKernelDelayThread(timeout);
+  }
   thread_wait_end();
   *__errno_bionic() = 4;  // EINTR
   return -1;
@@ -337,6 +356,10 @@ static void handle_exception(KuKernelExceptionContext *ctx, int sig, const char 
     ctx->SPSR &= ~0x0600FC00;  // clear Thumb IT state bits
     return;
   }
+
+  // Unity's crash reporter can itself fault while chaining to a null handler.
+  // Preserve the first native context before entering the guest reporter.
+  if (repeats == 0) log_crash(ctx, what);
 
   bionic_siginfo info;
   memset(&info, 0, sizeof(info));

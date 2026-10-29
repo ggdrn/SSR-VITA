@@ -1,3 +1,4 @@
+#include "../util/observe.h"
 // EGL on top of vitaGL plus GLES2 entry points that need soft-float shims or
 // different answers. Unity is steered to its GLES2 renderer by refusing ES3
 // contexts and only exporting GLES2 symbols.
@@ -41,6 +42,12 @@ uintptr_t dynlib_lookup(const char *name);
 #define FAKE_CONFIG ((void *)0xE61C0001)
 #define FAKE_SURFACE ((void *)0xE6150001)
 #define FAKE_CONTEXT ((void *)0xE61C7001)
+
+static gl_perf_sample gl_perf;
+void gl_perf_take(gl_perf_sample *sample) {
+  *sample = gl_perf;
+  memset(&gl_perf, 0, sizeof(gl_perf));
+}
 
 static int egl_error = EGL_SUCCESS;
 
@@ -110,11 +117,25 @@ void *eglCreateContext_bridge(void *dpy, void *cfg, void *share, const int *attr
 int eglDestroyContext_bridge(void *dpy, void *ctx) { return egl_ok(); }
 int eglMakeCurrent_bridge(void *dpy, void *draw, void *read, void *ctx) { return egl_ok(); }
 
+static unsigned shader_cache_counts[5];
+static unsigned observed_link_program;
+void vgl_shader_cache_event(unsigned event) {
+  if (event < 5) {
+    __atomic_fetch_add(&shader_cache_counts[event], 1, __ATOMIC_RELAXED);
+    const char *names[] = {"cache-hit", "cache-miss", "cache-saved", "cache-error", "compiler-invoked"};
+    char label[64]; unsigned program = __atomic_load_n(&observed_link_program, __ATOMIC_RELAXED);
+    snprintf(label, sizeof(label), "%s program=%u", names[event], program);
+    if (event == 1 || event == 3 || event == 4) observe_span(OBS_SHADER, label, observe_now(), 0, event, program);
+  }
+}
+
 static void gl_frame_stats(void);
 
 int eglSwapBuffers_bridge(void *dpy, void *surf) {
   gl_frame_stats();
+  uint64_t start = sceKernelGetProcessTimeWide();
   vglSwapBuffers(ime_running());  // GL_TRUE lets a common dialog draw on top
+  gl_perf.present_us += sceKernelGetProcessTimeWide() - start;
   return egl_ok();
 }
 
@@ -292,6 +313,41 @@ static char *rename_reserved(const char *src) {
   return NULL;
 }
 
+// The character's two-pass material links successfully, but its legacy
+// vertex-light/envmap path does not produce a visible body on this renderer.
+// Use an opaque diffuse pass with the same position, depth and texture UVs.
+// A marker file permits comparison with the original material on hardware.
+static int character_compat = 1;
+static const char character_vertex[] =
+  "attribute vec4 _glesVertex;\n"
+  "attribute vec4 _glesMultiTexCoord0;\n"
+  "uniform highp mat4 glstate_matrix_mvp;\n"
+  "uniform highp vec4 _DifTex_ST;\n"
+  "uniform highp float _InnerZOffset;\n"
+  "varying highp vec2 xlv_TEXCOORD0;\n"
+  "void main() { gl_Position = glstate_matrix_mvp * _glesVertex;\n"
+  "gl_Position.z += _InnerZOffset * 0.01;\n"
+  "xlv_TEXCOORD0 = _glesMultiTexCoord0.xy * _DifTex_ST.xy + _DifTex_ST.zw; }\n";
+static const char character_fragment[] =
+  "precision mediump float;\n"
+  "uniform sampler2D _DifTex;\n"
+  "uniform highp vec4 _DifCol;\n"
+  "varying highp vec2 xlv_TEXCOORD0;\n"
+  "void main() { gl_FragColor = vec4(texture2D(_DifTex, xlv_TEXCOORD0).rgb * _DifCol.rgb, 1.0); }\n";
+
+static const char *character_shader_source(GLenum type, const char *source) {
+  if (!character_compat) return source;
+  int vertex = type == GL_VERTEX_SHADER && strstr(source, "_InnerZOffset") &&
+    strstr(source, "_DifTex_ST") && strstr(source, "unity_LightPosition") &&
+    strstr(source, "glstate_matrix_invtrans_modelview0");
+  int fragment = type == GL_FRAGMENT_SHADER && strstr(source, "_DifTex") &&
+    strstr(source, "_EnvTex") && strstr(source, "_DifCol") &&
+    strstr(source, "xlv_COLOR") && strstr(source, "xlv_TEXCOORD1");
+  if (!vertex && !fragment) return source;
+  L_INFO("gl: character diffuse compatibility %s shader selected", vertex ? "vertex" : "fragment");
+  return vertex ? character_vertex : character_fragment;
+}
+
 void glShaderSource_bridge(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
   size_t total = 0;
   for (int i = 0; i < count; i++)
@@ -303,7 +359,9 @@ void glShaderSource_bridge(GLuint shader, GLsizei count, const GLchar *const *st
     p += n;
   }
   *p = 0;
-  char *src = rename_reserved(joined);
+  GLint type = 0;
+  glGetShaderiv(shader, GL_SHADER_TYPE, &type);
+  char *src = rename_reserved(character_shader_source(type, joined));
   free(joined);
   glShaderSource(shader, 1, (const GLchar *const *)&src, NULL);
   if (shader < MAX_SHADERS) {
@@ -432,13 +490,61 @@ static int seen_format(uint32_t key) {
   return 0;
 }
 
+// vitaGL's normal debug printf is disabled in this build; keep allocation
+// failures in the same persistent log as the guest crash report.
+void vgl_texture_allocation_failure(const char *operation, uint32_t bytes) {
+  L_WARN("gl: texture allocation failed: %s %u bytes; free VRAM=%u RAM=%u PHY=%u KB",
+         operation, bytes, (unsigned)(vglMemFree(VGL_MEM_VRAM) / 1024),
+         (unsigned)(vglMemFree(VGL_MEM_RAM) / 1024),
+         (unsigned)(vglMemFree(VGL_MEM_PHYCONT) / 1024));
+}
+
+// Bound disk logging to loading-time diagnostics; never log every small upload.
+static unsigned texture_trace_count;
+static int trace_texture(const char *call, GLint level, GLsizei w, GLsizei h, const void *data) {
+  if ((int64_t)w * h < 1024 * 1024 || texture_trace_count >= 96) return 0;
+  L_INFO("gl: texture begin #%u %s level %d %dx%d data %p GPU free VRAM=%u RAM=%u PHY=%u KB",
+         ++texture_trace_count, call, level, w, h, data,
+         (unsigned)(vglMemFree(VGL_MEM_VRAM) / 1024),
+         (unsigned)(vglMemFree(VGL_MEM_RAM) / 1024),
+         (unsigned)(vglMemFree(VGL_MEM_PHYCONT) / 1024));
+  return 1;
+}
+
+void glTexSubImage2D_bridge(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
+                            GLenum fmt, GLenum type, const void *data) {
+  int trace = trace_texture("subimage", level, w, h, data);
+  uint64_t start = sceKernelGetProcessTimeWide();
+  glTexSubImage2D(target, level, x, y, w, h, fmt, type, data);
+  gl_perf.texture_us += sceKernelGetProcessTimeWide() - start;
+  if (level == 0 || sceKernelGetProcessTimeWide() - start >= 50000) {
+  GLint bound = 0;
+  if (target == GL_TEXTURE_2D) glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+  char observed_name[96];
+  snprintf(observed_name, sizeof(observed_name), "subimage texture=%d %dx%d mip=%d", bound, w, h, level);
+  observe_span(OBS_TEXTURE, observed_name, start, 0, 0, bound);
+  }
+  if (trace) L_INFO("gl: texture end subimage");
+}
+
 // `before` is an error left by an earlier call (e.g. an unsupported
 // glTexParameter); only `after` belongs to the upload itself. Each format is
 // logged once, plus once more the first time its upload itself fails.
 void glTexImage2D_bridge(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum fmt,
                          GLenum type, const void *data) {
   GLenum before = glGetError();
+  int trace = trace_texture("image", level, w, h, data);
+  uint64_t start = sceKernelGetProcessTimeWide();
   glTexImage2D(target, level, ifmt, w, h, border, fmt, type, data);
+  gl_perf.texture_us += sceKernelGetProcessTimeWide() - start;
+  if (level == 0 || sceKernelGetProcessTimeWide() - start >= 50000) {
+  GLint bound = 0;
+  if (target == GL_TEXTURE_2D) glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+  char observed_name[96];
+  snprintf(observed_name, sizeof(observed_name), "image texture=%d %dx%d mip=%d", bound, w, h, level);
+  observe_span(OBS_TEXTURE, observed_name, start, 0, 0, bound);
+  }
+  if (trace) L_INFO("gl: texture end image");
   GLenum after = glGetError();
   uint32_t key = ((uint32_t)fmt << 16) ^ type ^ ((uint32_t)ifmt << 8);
   if (!seen_format(key) || (after && !seen_format(key | 0x40000000)))
@@ -449,7 +555,18 @@ void glTexImage2D_bridge(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsi
 void glCompressedTexImage2D_bridge(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
                                    GLsizei size, const void *data) {
   GLenum before = glGetError();
+  int trace = trace_texture("compressed", level, w, h, data);
+  uint64_t start = sceKernelGetProcessTimeWide();
   glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
+  gl_perf.texture_us += sceKernelGetProcessTimeWide() - start;
+  if (level == 0 || sceKernelGetProcessTimeWide() - start >= 50000) {
+  GLint bound = 0;
+  if (target == GL_TEXTURE_2D) glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+  char observed_name[96];
+  snprintf(observed_name, sizeof(observed_name), "compressed texture=%d %dx%d mip=%d", bound, w, h, level);
+  observe_span(OBS_TEXTURE, observed_name, start, size > 0 ? size : 0, 0, bound);
+  }
+  if (trace) L_INFO("gl: texture end compressed");
   GLenum after = glGetError();
   uint32_t key = 0x80000000 | ifmt;
   if (!seen_format(key) || (after && !seen_format(key | 0x40000000)))
@@ -505,13 +622,17 @@ static int draw_allowed(void) {
 void glDrawElements_bridge(GLenum mode, GLsizei count, GLenum type, const void *indices) {
   if (!draw_allowed())
     return;
+  uint64_t start = sceKernelGetProcessTimeWide();
   glDrawElements(mode, count, type, indices);
+  gl_perf.draw_us += sceKernelGetProcessTimeWide() - start;
 }
 
 void glDrawArrays_bridge(GLenum mode, GLint first, GLsizei count) {
   if (!draw_allowed())
     return;
+  uint64_t start = sceKernelGetProcessTimeWide();
   glDrawArrays(mode, first, count);
+  gl_perf.draw_us += sceKernelGetProcessTimeWide() - start;
 }
 
 static void gl_frame_stats(void) {
@@ -522,6 +643,10 @@ static void gl_frame_stats(void) {
            draws_this_frame, err, links_ok, link_failures);
     L_INFO("gl:   draws skipped (unlinked program) %u, without program %u; %u links took %u ms (%u over 100 ms)",
            draws_skipped, draws_no_program, links_total, (unsigned)(link_us_total / 1000), slow_links);
+    unsigned cache[5];
+    for (unsigned i = 0; i < 5; i++) cache[i] = __atomic_load_n(&shader_cache_counts[i], __ATOMIC_RELAXED);
+    L_INFO("gl: shader cache hits %u misses %u saved %u errors %u compiler calls %u",
+           cache[0], cache[1], cache[2], cache[3], cache[4]);
     draws_skipped = draws_no_program = 0;
   }
   draws_this_frame = 0;
@@ -579,6 +704,15 @@ static void locations_clear(GLuint prog) {
 
 GLint glGetUniformLocation_bridge(GLuint prog, const GLchar *name) {
   GLint real = glGetUniformLocation(prog, name);
+  size_t length = strlen(name);
+  if (real == -1 && length > 3 && !strcmp(name + length - 3, "[0]")) {
+    char *base = strdup(name);
+    if (base) {
+      base[length - 3] = 0;
+      real = glGetUniformLocation(prog, base);
+      free(base);
+    }
+  }
   if (real == -1 || prog >= MAX_PROGRAMS)
     return -1;
   location_table *t = &locations[prog];
@@ -637,16 +771,23 @@ void glLinkProgram_bridge(GLuint prog) {
   // Shaders are compiled here (vitaGL's postponed mode), so this is where
   // loading time goes; the shader cache makes later runs skip it.
   SceUInt64 t0 = sceKernelGetProcessTimeWide();
+  __atomic_store_n(&observed_link_program, prog, __ATOMIC_RELAXED);
   glLinkProgram(prog);
+  __atomic_store_n(&observed_link_program, 0, __ATOMIC_RELAXED);
   SceUInt64 us = sceKernelGetProcessTimeWide() - t0;
   links_total++;
   link_us_total += us;
+  gl_perf.link_us += us;
   if (us > 100000) {
     slow_links++;
     if (slow_links <= 10)
       L_INFO("gl: program %u took %u ms to compile and link", prog, (unsigned)(us / 1000));
   }
   check_link(prog);
+  char observed_name[96];
+  snprintf(observed_name, sizeof(observed_name), "program=%u vertex=%u fragment=%u", prog,
+           prog < 1025 ? program_shaders[prog][0] : 0, prog < 1025 ? program_shaders[prog][1] : 0);
+  observe_span(OBS_SHADER, observed_name, t0, 0, prog < 1025 ? prog_linked[prog] : 0, prog);
 }
 
 void glDeleteProgram_bridge(GLuint prog) {
@@ -674,8 +815,13 @@ void glDeleteProgram_bridge(GLuint prog) {
 }
 
 void gl_bridge_init(void) {
-  vglSetupRuntimeShaderCompiler(SHARK_OPT_UNSAFE, SHARK_ENABLE, SHARK_ENABLE, SHARK_ENABLE);
-  vglSetShaderCachePath(DATA_PATH "/shader_cache");
+  FILE *marker = fopen(DATA_PATH "/original_character_shader", "rb");
+  if (marker) { character_compat = 0; fclose(marker); }
+  L_INFO("gl: character shader mode %s", character_compat ? "diffuse compatibility" : "original");
+  // Keep standard optimization rather than unsafe algebra on legacy Unity
+  // shaders; lighting normalizes vectors that can be zero during transitions.
+  vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, SHARK_DISABLE, SHARK_ENABLE, SHARK_ENABLE);
+  vglSetShaderCachePath(DATA_PATH "/shader_cache_v35");
   vglInitExtended(0, SCREEN_W, SCREEN_H, VGL_RAM_THRESHOLD, SCE_GXM_MULTISAMPLE_NONE);
   L_INFO("gl: vitaGL ready (%dx%d)", SCREEN_W, SCREEN_H);
 }
