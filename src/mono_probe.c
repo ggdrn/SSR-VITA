@@ -12,7 +12,7 @@
 #include "util/observe.h"
 #include <psp2/kernel/sysmem.h>
 #include "util/gc_policy.h"
-#include "util/alloc_trace.h"
+#include "util/bundle_mips.h"
 #include "ui_mesh.h"
 #include "util/native_heap.h"
 #include <malloc.h>
@@ -135,57 +135,55 @@ static void install_gc_trace(so_module *mono) {
   L_INFO("perf: installed allocation-free GC phase timings (original notifier preserved)");
 }
 
-// Diagnostic: which managed classes produce the garbage that paces the
-// collector. Mono only reports allocations from code JIT-compiled after this
-// point (earlier methods keep their inlined allocators), which still covers
-// the stage code: it is compiled when the first race starts.
-static uint32_t (*object_size_fn)(void *);
-static uint32_t alloc_object_size(void *object) {
-  uint32_t size = object_size_fn(object);
-  return size < 64 * 1024 * 1024 ? size : 0;
+// Diagnostic: race hitches of 100-250 ms show no GC, file I/O, shader link
+// or instantiate time. Time JIT compilation on the main thread (methods are
+// compiled on first call) without changing code generation: only the JIT
+// event flag is enabled; allocation events stay off so allocators remain inline.
+static SceUID jit_main_thread;
+static uint64_t jit_started, jit_frame_us, jit_frame_longest_us, jit_window_us;
+static unsigned jit_depth, jit_frame_methods, jit_window_methods, jit_other_methods;
+static MonoMethod *jit_frame_longest, *jit_window_longest;
+static uint64_t jit_window_longest_us;
+static MonoClass *(*method_class_fn)(MonoMethod *);
+static const char *(*method_name_fn)(MonoMethod *);
+
+static void jit_begin(void *profiler, MonoMethod *method) {
+  (void)profiler; (void)method;
+  if (sceKernelGetThreadId() != jit_main_thread) return;
+  if (jit_depth++ == 0) jit_started = sceKernelGetProcessTimeWide();
 }
-static void install_alloc_trace(so_module *mono) {
+static void jit_end(void *profiler, MonoMethod *method, int result) {
+  (void)profiler; (void)result;
+  if (sceKernelGetThreadId() != jit_main_thread) { __atomic_add_fetch(&jit_other_methods, 1, __ATOMIC_RELAXED); return; }
+  jit_frame_methods++;
+  if (!jit_depth || --jit_depth) return;
+  uint64_t us = sceKernelGetProcessTimeWide() - jit_started;
+  jit_frame_us += us;
+  if (us > jit_frame_longest_us) { jit_frame_longest_us = us; jit_frame_longest = method; }
+}
+static void install_jit_trace(so_module *mono) {
   static int installed;
   if (installed) return;
   installed = 1;
   void (*install)(void *, void *) = (void *)so_symbol(mono, "mono_profiler_install");
-  void (*install_alloc)(void *) = (void *)so_symbol(mono, "mono_profiler_install_allocation");
+  void (*install_jit)(void *, void *) = (void *)so_symbol(mono, "mono_profiler_install_jit_compile");
   void (*set_events)(int) = (void *)so_symbol(mono, "mono_profiler_set_events");
-  object_size_fn = (void *)so_symbol(mono, "mono_object_get_size");
-  if (!install || !install_alloc || !set_events || !object_size_fn) {
-    L_WARN("alloc: Mono profiler API unavailable; allocation classes not traced");
+  method_class_fn = (void *)so_symbol(mono, "mono_method_get_class");
+  method_name_fn = (void *)so_symbol(mono, "mono_method_get_name");
+  if (!install || !install_jit || !set_events || !method_class_fn || !method_name_fn) {
+    L_WARN("jit: Mono profiler API unavailable; compile time not traced");
     return;
   }
   static uint32_t profiler_state;
-  alloc_trace_set_sizer(alloc_object_size);
-  // object.c's static profile_allocs gate was cleared at boot, when no
-  // profiler wanted allocations; every allocation path tests it before
-  // notifying. Re-arm it after checking the literal that addresses it.
-  uint32_t *gate = (uint32_t *)(mono->base + 0x3ae5ac);
-  if (mono->end < mono->base + 0x3ae5b0 || *(uint32_t *)(mono->base + 0x1fe438) != 0x001b01a0 ||
-      *(uint32_t *)(mono->base + 0x1fe400) != 0xe59f3030 || *(uint32_t *)(mono->base + 0x1fe404) != 0xe08f3003) {
-    L_WARN("alloc: profile_allocs gate not found; allocation classes not traced");
-    return;
-  }
+  jit_main_thread = sceKernelGetThreadId();
   install(&profiler_state, NULL);
-  install_alloc((void *)alloc_trace_record);
-  set_events(0x80); // MONO_PROFILE_ALLOCATIONS for this profiler only
-  __atomic_store_n(gate, 1, __ATOMIC_RELEASE);
-  L_INFO("alloc: per-class allocation trace installed (code JIT-compiled from now on)");
+  install_jit(jit_begin, jit_end);
+  set_events(0x10); // MONO_PROFILE_JIT_COMPILATION for this profiler only
+  L_INFO("jit: main-thread compile timing installed (allocation profiling off)");
 }
-
-static void alloc_trace_report(void) {
-  alloc_trace_entry top[10];
-  uint32_t count = 0, bytes = 0, lost = 0;
-  unsigned n = alloc_trace_take(top, 10, &count, &bytes, &lost);
-  if (!count) return;
-  L_INFO("alloc: window objects %u bytes %u KiB untracked-classes %u (NGUI buffer uploads total %u)", count,
-         bytes / 1024, lost, ui_mesh_clamped_calls());
-  for (unsigned i = 0; i < n; i++) {
-    const char *ns = api.class_get_namespace ? api.class_get_namespace(top[i].klass) : "";
-    L_INFO("alloc:   %s%s%s objects %u bytes %u KiB", ns && *ns ? ns : "", ns && *ns ? "." : "",
-           api.class_get_name(top[i].klass), top[i].count, top[i].bytes / 1024);
-  }
+static void jit_method_label(MonoMethod *method, char *out, size_t size) {
+  MonoClass *klass = method ? method_class_fn(method) : NULL;
+  snprintf(out, size, "%s.%s", klass ? api.class_get_name(klass) : "?", method ? method_name_fn(method) : "-");
 }
 
 static int probe_init(void) {
@@ -219,7 +217,7 @@ static int probe_init(void) {
   if (unity_image) {
     install_gc_trace(m);
     if (original_gc_event) install_gc_policy(m);
-    install_alloc_trace(m);
+    install_jit_trace(m);
   }
   return unity_image != NULL;
 }
@@ -309,9 +307,11 @@ void mono_texture_budget_tick(void) {
   if (!texture_budget_ready) texture_budget_init();
   if (!texture_limit_native_get || !texture_limit_native_set) return;
   int current = texture_limit_native_get();
+  bundle_mips_set_limit(current);
   if (current >= 1) return; // Preserve a stronger limit already selected.
   texture_limit_native_set(1);
   int applied = texture_limit_native_get();
+  bundle_mips_set_limit(applied);
   if (applied >= 1)
     L_INFO("mem: Unity masterTextureLimit %d -> %d (texture memory cap; quality mode preserved)", current, applied);
   else {
@@ -321,6 +321,8 @@ void mono_texture_budget_tick(void) {
 }
 
 static void quality_level_with_texture_budget(int level, int expensive) {
+  // Any texture reload inside the quality change reads complete mip chains.
+  bundle_mips_set_limit(0);
   quality_level_original(level, expensive);
   mono_texture_budget_tick();
 }
@@ -991,6 +993,18 @@ static int gc_manual_requests(uint32_t *count) {
   return 1;
 }
 
+static void jit_frame_reset(void) {
+  jit_window_methods += jit_frame_methods;
+  jit_window_us += jit_frame_us;
+  if (jit_frame_longest_us > jit_window_longest_us) {
+    jit_window_longest_us = jit_frame_longest_us;
+    jit_window_longest = jit_frame_longest;
+  }
+  jit_frame_methods = 0;
+  jit_frame_us = jit_frame_longest_us = 0;
+  jit_frame_longest = NULL;
+}
+
 // Native counters do not allocate managed objects or force collections.
 void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
   static int previous_count, initialized;
@@ -1029,7 +1043,7 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
   if (frame_us > worst_frame_us) worst_frame_us = frame_us;
   uint64_t extra_us = frame_us >= render_us ? frame_us - render_us : 0;
   if (extra_us > worst_extra_us) worst_extra_us = extra_us;
-  if (!api.gc_count) { observe_frame(render_us, frame_us, 0); return; }
+  if (!api.gc_count) { observe_frame(render_us, frame_us, 0); jit_frame_reset(); return; }
   int count = api.gc_count(0);
   unsigned delta = initialized && count >= previous_count ? count - previous_count : 0;
   initialized = 1;
@@ -1043,6 +1057,12 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
            graphics.draw_us / 1000.0, graphics.texture_us / 1000.0,
            graphics.present_us / 1000.0, graphics.link_us / 1000.0);
     L_INFO("perf: explicit GC requests %u available %d", manual_delta, manual_available);
+    if (jit_frame_methods) {
+      char label[160];
+      jit_method_label(jit_frame_longest, label, sizeof(label));
+      L_INFO("perf: main jit %.2f ms methods %u longest %.2f ms %s", jit_frame_us / 1000.0, jit_frame_methods,
+             jit_frame_longest_us / 1000.0, label);
+    }
     for (unsigned k = 0; k < WORK_KINDS; k++) {
       work_counter *c = &work.counter[k];
       so_module *m = so_module_at(c->caller);
@@ -1073,11 +1093,21 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
            gc_policy_desired(), gc_policy_applied(), gc_policy_conflict(),
            (unsigned)(native.total_free / 1024), (unsigned)(native.chunks_free / 1024), (unsigned)(native.unused_reserve / 1024));
     audio_diagnostics(); // native-only: measure clipping throughout gameplay
-    alloc_trace_report();
+    if (jit_window_methods) {
+      char label[160];
+      jit_method_label(jit_window_longest, label, sizeof(label));
+      L_INFO("jit: window main %u methods %.2f ms longest %.2f ms %s; other threads %u methods", jit_window_methods,
+             jit_window_us / 1000.0, jit_window_longest_us / 1000.0, label,
+             __atomic_exchange_n(&jit_other_methods, 0, __ATOMIC_RELAXED));
+    }
+    jit_window_methods = 0;
+    jit_window_us = jit_window_longest_us = 0;
+    jit_window_longest = NULL;
     collections = slow_with_gc = slow_without_gc = spikes = 0;
     worst_frame_us = worst_extra_us = 0;
     memset(&worst_gc, 0, sizeof(worst_gc));
   }
+  jit_frame_reset();
 }
 
 static MonoObject *find_all(const char *cls) {

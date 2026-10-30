@@ -58,7 +58,7 @@ add_executable(${PROJECT_NAME}
   src/util/work_trace.c
   src/util/gc_trace.c
   src/util/gc_policy.c
-  src/util/alloc_trace.c
+  src/util/bundle_mips.c
   src/util/log.c
   src/util/apk.c
   src/loader/so_util.c

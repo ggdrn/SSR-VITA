@@ -4,6 +4,7 @@
 #include "bridges.h"
 #include "../util/work_trace.h"
 #include "../util/observe.h"
+#include "../util/bundle_mips.h"
 #include "../config.h"
 #include "../util/log.h"
 
@@ -133,6 +134,7 @@ FILE *fopen_bridge(const char *path, const char *mode) {
       static unsigned bulk_streams;
       unsigned count = __atomic_add_fetch(&bulk_streams, 1, __ATOMIC_RELAXED);
       if (count <= 4 || (count & (count - 1)) == 0) L_INFO("io: direct sharedAssets streams %u (newlib bulk path)", count);
+      bundle_mips_open(f, p);
     }
   } else if (f && mode && mode[0] == 'r' && !strchr(mode, '+')) {
     // newlib's default stdio buffer is 1 KiB here, so a buffered 1 MiB fread
@@ -165,6 +167,7 @@ FILE *fdopen_bridge(int fd, const char *mode) {
   errno = saved; return f;
 }
 int fclose_bridge(void *f) {
+  bundle_mips_close(F(f));
   int result = fclose(F(f)), saved = errno;
   observe_file_forget((uintptr_t)f); errno = saved; return result;
 }
@@ -175,7 +178,8 @@ size_t fread_bridge(void *p, size_t s, size_t n, void *f) {
   char observed_name[128]; observe_file_label((uintptr_t)f, observed_name, sizeof(observed_name));
   uint64_t start = work_trace_begin();
   uint64_t observed_start = observe_now();
-  size_t got = fread(p, s, n, F(f));
+  size_t got;
+  if (!bundle_mips_fread(p, s, n, F(f), &got)) got = fread(p, s, n, F(f));
   int observed_errno = errno;
   work_trace_end(WORK_IO, start, (uint64_t)got * s, (uintptr_t)__builtin_return_address(0));
   observe_span(OBS_FILE, observed_name, observed_start, (uint64_t)got * s, 0, (uintptr_t)f);
