@@ -492,6 +492,50 @@ static void patch_stage_il(void) {
     if (header) free_header(header);
   }
 
+  // GC.Collect() calls placed right before/after Resources.UnloadUnusedAssets
+  // (whose operation already runs a full collection) and on menu entry or
+  // roulette spins. Each costs 0.4-1.9 s with the menu's live set; stage
+  // start showed 5 back-to-back collections. Only the 5-byte call (no stack
+  // effect) becomes NOPs; every UnloadUnusedAssets call stays, as do the
+  // loading-screen collections (LoadSetTableFirst, CreateTerrain, downloads).
+  static const uint8_t gc_call[] = {0x28,0x89,0x08,0x00,0x0a};
+  static const uint8_t call_nops[sizeof(gc_call)] = {0};
+  const struct { const char *cls, *name; uint32_t size, at[2]; } collect_sites[] = {
+    {"GameModeStage", "StateInit", 0xb04, {0x43, 0x4e}},
+    {"GameModeStage", "StateFadeIn", 0xed, {0x28, 0x33}},
+    {"GameModeStage", "StatePause", 0x16c, {0x77, 0x82}},
+    {"GameModeStage", "StateQuickModeTimeUp", 0xe0, {0xad, 0xb8}},
+    {"GameModeStage", "StateEnd", 0xdf, {0x4e, 0x59}},
+    {"GameModeStage", "RegisterAllResource", 0x1fc, {0x1f1, 0}},
+    {"GameModeTitle", "StateLoadLevel", 0x7b, {0x3f, 0}},
+    {"MainMenu", "PrepareForSceneMove", 0x3f, {0x39, 0}},
+    {"MainMenu", "Start", 0x2d1, {0x9d, 0}},
+    {"FirstLaunchUserSetting", "StateEndProcessSpEgg", 0xea, {0xab, 0}},
+    {"RouletteTop", "OnRouletteSpinStart", 0x154, {0x78, 0}},
+    {"RouletteTop", "OnRouletteSpinEnd", 0xf0, {0x3f, 0}},
+  };
+  unsigned collect_removed = 0, collect_methods = 0;
+  for (unsigned i = 0; i < sizeof(collect_sites) / sizeof(collect_sites[0]); i++) {
+    klass = api.class_from_name(game_image, "", collect_sites[i].cls);
+    method = klass ? api.get_method(klass, collect_sites[i].name, -1) : NULL;
+    header = method ? get_header(method) : NULL;
+    code = header ? get_code(header, &size, &stack) : NULL;
+    int ok = code && size == collect_sites[i].size;
+    for (unsigned j = 0; ok && j < 2 && collect_sites[i].at[j]; j++)
+      ok = !memcmp(code + collect_sites[i].at[j], gc_call, sizeof(gc_call));
+    if (ok) {
+      for (unsigned j = 0; j < 2 && collect_sites[i].at[j]; j++) {
+        kuKernelCpuUnrestrictedMemcpy((void *)(code + collect_sites[i].at[j]), call_nops, sizeof(call_nops));
+        kuKernelFlushCaches((void *)(code + collect_sites[i].at[j]), sizeof(call_nops));
+        collect_removed++;
+      }
+      collect_methods++;
+    } else L_WARN("stage: %s.%s IL differs; GC.Collect left original", collect_sites[i].cls, collect_sites[i].name);
+    if (header) free_header(header);
+  }
+  L_INFO("stage: removed %u redundant GC.Collect calls in %u methods (UnloadUnusedAssets kept)", collect_removed,
+         collect_methods);
+
   // LightPlaySE suppresses rings and other pickup cues in LightMode. Replace
   // its IsLightMode() result with false, keeping branch/stack/cue selection.
   klass = api.class_from_name(game_image, "", "ObjUtil");

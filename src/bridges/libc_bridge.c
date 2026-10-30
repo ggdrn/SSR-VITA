@@ -134,6 +134,18 @@ FILE *fopen_bridge(const char *path, const char *mode) {
       unsigned count = __atomic_add_fetch(&bulk_streams, 1, __ATOMIC_RELAXED);
       if (count <= 4 || (count & (count - 1)) == 0) L_INFO("io: direct sharedAssets streams %u (newlib bulk path)", count);
     }
+  } else if (f && mode && mode[0] == 'r' && !strchr(mode, '+')) {
+    // newlib's default stdio buffer is 1 KiB here, so a buffered 1 MiB fread
+    // becomes ~1000 card reads (se_runners.acb: 350 ms per MiB, 4x per scene
+    // change; BGM .awb streaming under 1 MB/s). Large read-only files get a
+    // 64 KiB buffer; small files keep the default.
+    struct stat st;
+    if (fstat(fileno(f), &st) == 0 && st.st_size >= 256 * 1024 && setvbuf(f, NULL, _IOFBF, 64 * 1024) == 0) {
+      static unsigned buffered_streams;
+      unsigned count = __atomic_add_fetch(&buffered_streams, 1, __ATOMIC_RELAXED);
+      if (count <= 4 || (count & (count - 1)) == 0)
+        L_INFO("io: 64 KiB read buffer streams %u (latest %s, %ld KiB)", count, p, (long)(st.st_size / 1024));
+    }
   }
   work_trace_end(WORK_IO, perf_start, 0, (uintptr_t)__builtin_return_address(0));
   if (f) observe_file_register((uintptr_t)f, path);
