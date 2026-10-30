@@ -4,6 +4,7 @@
 #include "bridges.h"
 #include "../loader/so_util.h"
 #include "../util/log.h"
+#include "../ui_mesh.h"
 
 #include <kubridge.h>
 #include <malloc.h>
@@ -203,7 +204,9 @@ void *dlsym_bridge(void *handle, const char *sym) {
   if (handle == DL_DISCORD_HANDLE)
     return (void *)ret0_bridge;
   uintptr_t addr = 0;
-  if (handle && handle != DL_DEFAULT_HANDLE)
+  if (sym && !strcmp(sym, "mono_add_internal_call"))
+    addr = (uintptr_t)ui_mesh_icall_registrar();
+  if (!addr && handle && handle != DL_DEFAULT_HANDLE)
     addr = so_symbol((so_module *)handle, sym);
   if (!addr)
     addr = dynlib_lookup(sym);

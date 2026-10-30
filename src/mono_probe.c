@@ -13,6 +13,7 @@
 #include <psp2/kernel/sysmem.h>
 #include "util/gc_policy.h"
 #include "util/alloc_trace.h"
+#include "ui_mesh.h"
 #include "util/native_heap.h"
 #include <malloc.h>
 #include <stdio.h>
@@ -178,7 +179,8 @@ static void alloc_trace_report(void) {
   uint32_t count = 0, bytes = 0, lost = 0;
   unsigned n = alloc_trace_take(top, 10, &count, &bytes, &lost);
   if (!count) return;
-  L_INFO("alloc: window objects %u bytes %u KiB untracked-classes %u", count, bytes / 1024, lost);
+  L_INFO("alloc: window objects %u bytes %u KiB untracked-classes %u (NGUI buffer uploads total %u)", count,
+         bytes / 1024, lost, ui_mesh_clamped_calls());
   for (unsigned i = 0; i < n; i++) {
     const char *ns = api.class_get_namespace ? api.class_get_namespace(top[i].klass) : "";
     L_INFO("alloc:   %s%s%s objects %u bytes %u KiB", ns && *ns ? ns : "", ns && *ns ? "." : "",

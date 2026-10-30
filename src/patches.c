@@ -5,6 +5,7 @@
 #include "loader/so_util.h"
 #include "util/log.h"
 #include "util/gc_policy.h"
+#include "ui_mesh.h"
 
 #include <string.h>
 
@@ -70,4 +71,5 @@ void apply_patches(void) {
     L_INFO("patch: libmono mono_arch_flush_icache -> kuKernelFlushCaches");
   }
   if (mono) install_gc_pacing(mono);
+  ui_mesh_install();
 }

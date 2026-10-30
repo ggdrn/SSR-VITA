@@ -49,6 +49,7 @@ add_executable(${PROJECT_NAME}
   src/main.c
   src/unity_boot.c
   src/patches.c
+  src/ui_mesh.c
   src/mono_probe.c
   src/net/http.c
   src/net/ca_roots.c

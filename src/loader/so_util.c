@@ -405,6 +405,27 @@ uintptr_t so_symbol_global(const char *name) {
   return 0;
 }
 
+// Points every GOT/jump slot of `mod` that imports `name` at `addr`.
+// Returns how many slots changed (absolute relocations are left alone).
+int so_rebind_import(so_module *mod, const char *name, uintptr_t addr) {
+  int changed = 0;
+  Elf32_Rel *lists[2] = {mod->rel, mod->jmprel};
+  size_t counts[2] = {mod->num_rel, mod->num_jmprel};
+  for (int l = 0; l < 2; l++) {
+    for (size_t i = 0; i < counts[l]; i++) {
+      int type = ELF32_R_TYPE(lists[l][i].r_info);
+      if (type != R_ARM_GLOB_DAT && type != R_ARM_JUMP_SLOT)
+        continue;
+      Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(lists[l][i].r_info)];
+      if (sym->st_shndx != SHN_UNDEF || strcmp(mod->dynstr + sym->st_name, name))
+        continue;
+      write_word(mod, mod->base + lists[l][i].r_offset, addr);
+      changed++;
+    }
+  }
+  return changed;
+}
+
 so_module *so_module_at(uintptr_t addr) {
   for (so_module *m = modules; m; m = m->next) {
     if (addr >= m->text_base && addr < m->end)

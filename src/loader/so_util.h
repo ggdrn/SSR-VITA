@@ -69,6 +69,9 @@ uintptr_t so_symbol_global(const char *name);
 // Returns the module containing `addr`, if any (used for crash logs).
 so_module *so_module_at(uintptr_t addr);
 
+// Redirects an already resolved import of `mod`; returns slots changed.
+int so_rebind_import(so_module *mod, const char *name, uintptr_t addr);
+
 so_hook hook_addr(uintptr_t addr, uintptr_t dst);
 
 #define SO_CONTINUE(type, h, ...) ({ \
