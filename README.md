@@ -30,7 +30,10 @@ Item use and character switching are available during races, following the game'
 
 - **SEGA / Sonic Team** — original Sonic Runners game.
 - **Sonic Runners Revival team** — the fan revival and supplied splash artwork.
-- **VitaSDK, vitaGL, kubridge, and the PS Vita homebrew community** — tools and libraries that make this port possible.
+- **[Rinnegatamante (Alessio Tosto)](https://github.com/Rinnegatamante)** and the [vitaGL contributors](https://github.com/Rinnegatamante/vitaGL/graphs/contributors) — vitaGL graphics library.
+- **[TheFloW (Andy Nguyen)](https://github.com/TheOfficialFloW/kubridge)** — original kubridge; **[Bythos (bythos14)](https://github.com/bythos14/kubridge)** — the extended kubridge variant used by this port.
+- **[VitaSDK contributors](https://github.com/vitasdk/vita-toolchain/graphs/contributors)** — SDK and toolchain, including **Princess-of-Sleeping, frangarcj, xyzz, yifanlu, dmchurch, DaveeFTW, d3m3vilurr, isage, 173210, and xerpi**.
+- **The PS Vita homebrew community** — shared research, documentation, and support.
 
 Game assets and trademarks belong to their respective owners.
 
