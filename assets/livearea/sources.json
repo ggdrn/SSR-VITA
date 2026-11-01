@@ -1,0 +1,293 @@
+{
+  "apk_sha256": "50b91eaa208d46b21289a967b1d8eb71fee5a6c5861c62f732cd1447ddcf10d0",
+  "icon_entry": "res/mipmap-xxxhdpi-v4/ic_launcher_round.png",
+  "atlas_entry_parts": [
+    "assets/bin/Data/sharedassets0.assets.split0",
+    "assets/bin/Data/sharedassets0.assets.split1",
+    "assets/bin/Data/sharedassets0.assets.split2",
+    "assets/bin/Data/sharedassets0.assets.split3",
+    "assets/bin/Data/sharedassets0.assets.split4",
+    "assets/bin/Data/sharedassets0.assets.split5",
+    "assets/bin/Data/sharedassets0.assets.split6",
+    "assets/bin/Data/sharedassets0.assets.split7",
+    "assets/bin/Data/sharedassets0.assets.split8",
+    "assets/bin/Data/sharedassets0.assets.split9",
+    "assets/bin/Data/sharedassets0.assets.split10",
+    "assets/bin/Data/sharedassets0.assets.split11",
+    "assets/bin/Data/sharedassets0.assets.split12",
+    "assets/bin/Data/sharedassets0.assets.split13",
+    "assets/bin/Data/sharedassets0.assets.split14",
+    "assets/bin/Data/sharedassets0.assets.split15",
+    "assets/bin/Data/sharedassets0.assets.split16",
+    "assets/bin/Data/sharedassets0.assets.split17",
+    "assets/bin/Data/sharedassets0.assets.split18",
+    "assets/bin/Data/sharedassets0.assets.split19",
+    "assets/bin/Data/sharedassets0.assets.split20",
+    "assets/bin/Data/sharedassets0.assets.split21",
+    "assets/bin/Data/sharedassets0.assets.split22",
+    "assets/bin/Data/sharedassets0.assets.split23",
+    "assets/bin/Data/sharedassets0.assets.split24",
+    "assets/bin/Data/sharedassets0.assets.split25",
+    "assets/bin/Data/sharedassets0.assets.split26",
+    "assets/bin/Data/sharedassets0.assets.split27",
+    "assets/bin/Data/sharedassets0.assets.split28",
+    "assets/bin/Data/sharedassets0.assets.split29",
+    "assets/bin/Data/sharedassets0.assets.split30",
+    "assets/bin/Data/sharedassets0.assets.split31",
+    "assets/bin/Data/sharedassets0.assets.split32",
+    "assets/bin/Data/sharedassets0.assets.split33",
+    "assets/bin/Data/sharedassets0.assets.split34",
+    "assets/bin/Data/sharedassets0.assets.split35",
+    "assets/bin/Data/sharedassets0.assets.split36",
+    "assets/bin/Data/sharedassets0.assets.split37",
+    "assets/bin/Data/sharedassets0.assets.split38",
+    "assets/bin/Data/sharedassets0.assets.split39",
+    "assets/bin/Data/sharedassets0.assets.split40",
+    "assets/bin/Data/sharedassets0.assets.split41",
+    "assets/bin/Data/sharedassets0.assets.split42",
+    "assets/bin/Data/sharedassets0.assets.split43",
+    "assets/bin/Data/sharedassets0.assets.split44"
+  ],
+  "atlas_texture": "ui_title_Atlas",
+  "sprites": {
+    "sonic": {
+      "sprite": "ui_title_img_sonic",
+      "rect_xywh": [
+        0,
+        1103,
+        341,
+        112
+      ],
+      "padding_lrtb": [
+        6,
+        1,
+        4,
+        4
+      ]
+    },
+    "runners": {
+      "sprite": "ui_title_img_runners",
+      "rect_xywh": [
+        521,
+        1331,
+        382,
+        101
+      ],
+      "padding_lrtb": [
+        2,
+        4,
+        4,
+        3
+      ]
+    },
+    "revival": {
+      "sprite": "revival",
+      "rect_xywh": [
+        342,
+        1112,
+        341,
+        103
+      ],
+      "padding_lrtb": [
+        0,
+        0,
+        5,
+        4
+      ]
+    },
+    "base-white": {
+      "sprite": "ui_title_img_sonic_base_white",
+      "rect_xywh": [
+        0,
+        1329,
+        520,
+        318
+      ],
+      "padding_lrtb": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "base-blue": {
+      "sprite": "ui_title_img_base_blue",
+      "rect_xywh": [
+        521,
+        1433,
+        417,
+        214
+      ],
+      "padding_lrtb": [
+        18,
+        5,
+        9,
+        9
+      ]
+    },
+    "star": {
+      "sprite": "ui_title_img_star",
+      "rect_xywh": [
+        889,
+        1716,
+        99,
+        137
+      ],
+      "padding_lrtb": [
+        395,
+        26,
+        96,
+        85
+      ]
+    }
+  },
+  "background_texture": "fan-background.png",
+  "game_splash": {
+    "texture": "Splash3",
+    "format": "RGB24",
+    "payload_bytes": 4194309,
+    "payload_fnv1a": "40e53d7f",
+    "fan_image_sha256": "1f4c776bb8322e22d16a60cfb74923bc52b3ad41dd312124f12a2b6d8f16133c"
+  },
+  "logo_scene": "assets/bin/Data/mainData",
+  "logo_layers": [
+    {
+      "sprite": "ui_title_img_runners",
+      "key": "runners",
+      "width": 388,
+      "height": 108,
+      "depth": 4,
+      "color": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "position": {
+        "x": -26.0,
+        "y": -27.0,
+        "z": 0.0
+      },
+      "scale": {
+        "x": 1.0,
+        "y": 1.0,
+        "z": 1.0
+      }
+    },
+    {
+      "sprite": "ui_title_img_star",
+      "key": "star",
+      "width": 448,
+      "height": 128,
+      "depth": 2,
+      "color": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "position": {
+        "x": -37.0,
+        "y": -27.0,
+        "z": 0.0
+      },
+      "scale": {
+        "x": 1.5,
+        "y": 2.799999952316284,
+        "z": 1.0
+      }
+    },
+    {
+      "sprite": "ui_title_img_sonic_base_white",
+      "key": "base-white",
+      "width": 512,
+      "height": 272,
+      "depth": 1,
+      "color": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "position": {
+        "x": 15.0,
+        "y": -27.0,
+        "z": 0.0
+      },
+      "scale": {
+        "x": 1.0499999523162842,
+        "y": 1.2000000476837158,
+        "z": 1.0
+      }
+    },
+    {
+      "sprite": "ui_title_img_sonic",
+      "key": "sonic",
+      "width": 348,
+      "height": 120,
+      "depth": 4,
+      "color": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "position": {
+        "x": -31.083330154418945,
+        "y": 63.08332824707031,
+        "z": 0.0
+      },
+      "scale": {
+        "x": 1.0,
+        "y": 1.0,
+        "z": 1.0
+      }
+    },
+    {
+      "sprite": "ui_title_img_base_blue",
+      "key": "base-blue",
+      "width": 440,
+      "height": 232,
+      "depth": 3,
+      "color": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "position": {
+        "x": -37.0,
+        "y": 19.0,
+        "z": 0.0
+      },
+      "scale": {
+        "x": 1.0,
+        "y": 1.0,
+        "z": 1.0
+      }
+    },
+    {
+      "sprite": "revival",
+      "key": "revival",
+      "width": 1257,
+      "height": 82,
+      "depth": 5,
+      "color": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "position": {
+        "x": -16.0,
+        "y": -115.0,
+        "z": 0.0
+      },
+      "scale": {
+        "x": 0.3400000035762787,
+        "y": 1.600000023841858,
+        "z": 1.0000799894332886
+      }
+    }
+  ]
+}

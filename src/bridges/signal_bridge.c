@@ -149,6 +149,20 @@ static sig_slot *slot_for(uint32_t thread, int create) {
   return create ? free_slot : NULL;
 }
 
+// A finished guest thread cannot consume pending GC signals. Retire its
+// bounded slot and semaphore so repeated scene/audio workers do not exhaust
+// the signal table or inherit pending signals after UID reuse.
+void signal_forget_thread(int uid) {
+  sceKernelLockLwMutex(&sig_lock, 1, NULL);
+  sig_slot *slot = slot_for((uint32_t)uid, 0);
+  if (slot) {
+    total_pending -= __builtin_popcount(slot->pending);
+    if (slot->wake > 0) sceKernelDeleteSema(slot->wake);
+    memset(slot, 0, sizeof(*slot));
+  }
+  sceKernelUnlockLwMutex(&sig_lock, 1);
+}
+
 static uint32_t self_id(void) { return (uint32_t)sceKernelGetThreadId(); }
 
 static void deliver_now(int sig) {

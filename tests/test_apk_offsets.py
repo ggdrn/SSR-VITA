@@ -13,6 +13,8 @@ src=(root/'src/util/apk.c').read_text()
 a=src.index('int64_t apk_data_offset(');b=src.index('void *apk_extract(',a)
 c=src.index('int apk_read_stored(')
 h=r'''#include "util/apk.h"
+#define title_layout_apply(...) ((void)0)
+#define splash_art_apply(...) ((void)0)
 #include "util/observe.h"
 #include <stdint.h>
 #include <assert.h>

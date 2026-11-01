@@ -315,7 +315,8 @@ static char *rename_reserved(const char *src) {
 
 // The character's two-pass material links successfully, but its legacy
 // vertex-light/envmap path does not produce a visible body on this renderer.
-// Use an opaque diffuse pass with the same position, depth and texture UVs.
+// The environment/normal variant produced corrupted colors on some player
+// materials. Restore the diffuse compatibility pair used before v57.
 // A marker file permits comparison with the original material on hardware.
 static int character_compat = 1;
 static const char character_vertex[] =
@@ -344,7 +345,7 @@ static const char *character_shader_source(GLenum type, const char *source) {
     strstr(source, "_EnvTex") && strstr(source, "_DifCol") &&
     strstr(source, "xlv_COLOR") && strstr(source, "xlv_TEXCOORD1");
   if (!vertex && !fragment) return source;
-  L_INFO("gl: character diffuse compatibility %s shader selected", vertex ? "vertex" : "fragment");
+  L_INFO("gl: character diffuse compatibility %s shader selected (envmap rollback)", vertex ? "vertex" : "fragment");
   return vertex ? character_vertex : character_fragment;
 }
 
@@ -817,7 +818,7 @@ void glDeleteProgram_bridge(GLuint prog) {
 void gl_bridge_init(void) {
   FILE *marker = fopen(DATA_PATH "/original_character_shader", "rb");
   if (marker) { character_compat = 0; fclose(marker); }
-  L_INFO("gl: character shader mode %s", character_compat ? "diffuse compatibility" : "original");
+  L_INFO("gl: character shader mode %s", character_compat ? "diffuse compatibility (envmap rollback)" : "original");
   // Keep standard optimization rather than unsafe algebra on legacy Unity
   // shaders; lighting normalizes vectors that can be zero during transitions.
   vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, SHARK_DISABLE, SHARK_ENABLE, SHARK_ENABLE);

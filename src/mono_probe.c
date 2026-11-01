@@ -14,7 +14,12 @@
 #include "util/gc_policy.h"
 #include "util/bundle_mips.h"
 #include "ui_mesh.h"
+#include "util/ui_geometry.h"
+#include "util/managed_trace.h"
 #include "util/native_heap.h"
+#include "util/race_warmup.h"
+#include "util/terrain_gc.h"
+#include "util/ui_trim.h"
 #include <malloc.h>
 #include <stdio.h>
 #include <psp2/kernel/processmgr.h>
@@ -22,6 +27,7 @@
 #include <kubridge.h>
 #include <stdint.h>
 #include <string.h>
+#include <strings.h>
 
 typedef void MonoImage, MonoClass, MonoMethod, MonoObject, MonoDomain, MonoType, MonoField;
 
@@ -182,8 +188,9 @@ static void install_jit_trace(so_module *mono) {
   L_INFO("jit: main-thread compile timing installed (allocation profiling off)");
 }
 static void jit_method_label(MonoMethod *method, char *out, size_t size) {
-  MonoClass *klass = method ? method_class_fn(method) : NULL;
-  snprintf(out, size, "%s.%s", klass ? api.class_get_name(klass) : "?", method ? method_name_fn(method) : "-");
+  MonoClass *klass = method && method_class_fn ? method_class_fn(method) : NULL;
+  snprintf(out, size, "%s.%s", klass && api.class_get_name ? api.class_get_name(klass) : "?",
+           method && method_name_fn ? method_name_fn(method) : "-");
 }
 
 static int probe_init(void) {
@@ -256,6 +263,13 @@ static MonoObject *call_in(MonoImage *img, const char *ns, const char *cls, cons
 // though the game writes facebookTime using the current culture. Keep the
 // original comparison, but contain parse failures at this boundary.
 static MonoImage *game_image;
+static MonoMethod *ui_panel_late_method;
+typedef SOFTFP float (*input_time_getter)(void);
+static input_time_getter input_time_scale;
+static int input_race_scene;
+void mono_input_tick(void) {
+  input_set_race_controls(input_race_scene && input_time_scale && input_time_scale() > 0.0f);
+}
 static int facebook_window_safe(MonoObject *self) {
   MonoImage *corlib = api.get_corlib();
   MonoObject *date = call_in(game_image, "SaveData", "SystemData", "get_facebookTime", self, NULL, 0);
@@ -499,7 +513,9 @@ static void patch_stage_il(void) {
   // roulette spins. Each costs 0.4-1.9 s with the menu's live set; stage
   // start showed 5 back-to-back collections. Only the 5-byte call (no stack
   // effect) becomes NOPs; every UnloadUnusedAssets call stays, as do the
-  // loading-screen collections (LoadSetTableFirst, CreateTerrain, downloads).
+  // loading-screen collections (LoadSetTableFirst and downloads). The
+  // terminal CreateTerrain collection is handled separately below: that
+  // coroutine also runs when rebuilding terrain in the middle of a race.
   static const uint8_t gc_call[] = {0x28,0x89,0x08,0x00,0x0a};
   static const uint8_t call_nops[sizeof(gc_call)] = {0};
   const struct { const char *cls, *name; uint32_t size, at[2]; } collect_sites[] = {
@@ -552,6 +568,61 @@ static void patch_stage_il(void) {
     kuKernelFlushCaches((void *)code, sizeof(play_in_light_mode));
     L_INFO("sound: enabled pickup cues in LightMode (graphics mode preserved)");
   } else L_WARN("sound: LightPlaySE IL differs; light-mode audio left original");
+  if (header) free_header(header);
+}
+
+// BetterList<T>.Trim allocates an exact-size array for NGUI mesh uploads.
+// Retain allocation and all branches; let Array.Copy handle values/references
+// and GC write barriers instead of interpreting one ldelem/stelem per item.
+static void patch_ui_trim_il(void) {
+  so_module *mono = so_find_module("libmono.so");
+  const char *(*guid)(MonoImage *) = (void *)so_symbol(mono, "mono_image_get_guid");
+  MonoMethod *(*get_method)(MonoImage *, uint32_t, MonoClass *) = (void *)so_symbol(mono, "mono_get_method");
+  void *(*get_header)(MonoMethod *) = (void *)so_symbol(mono, "mono_method_get_header");
+  const uint8_t *(*get_code)(void *, uint32_t *, uint32_t *) = (void *)so_symbol(mono, "mono_method_header_get_code");
+  void (*free_header)(void *) = (void *)so_symbol(mono, "mono_metadata_free_mh");
+  const char *id = guid ? guid(game_image) : NULL;
+  if (!id || strcasecmp(id, RACE_WARMUP_MVID) || !get_method || !get_header || !get_code || !free_header) {
+    L_WARN("ui: Trim assembly/API differs; original copy preserved"); return;
+  }
+  MonoMethod *method = get_method(game_image, 0x060001ec, NULL);
+  void *header = method ? get_header(method) : NULL;
+  uint32_t size = 0, stack = 0;
+  const uint8_t *code = header ? get_code(header, &size, &stack) : NULL;
+  if (code && stack >= 5 && size == sizeof(ui_trim_original) && !memcmp(code, ui_trim_original, size)) {
+    kuKernelCpuUnrestrictedMemcpy((void *)(code + UI_TRIM_COPY_AT), ui_trim_copy, sizeof(ui_trim_copy));
+    kuKernelFlushCaches((void *)(code + UI_TRIM_COPY_AT), sizeof(ui_trim_copy));
+    L_INFO("ui: BetterList Trim uses runtime Array.Copy (exact sizes and GC barriers preserved; future JIT)");
+  } else L_WARN("ui: Trim IL/stack differs; original copy preserved");
+  if (header) free_header(header);
+}
+
+// ReCreateTerrain starts this coroutine again during a run. Its final
+// instruction forces a full collection even with ample free memory. Keep
+// all terrain creation/return-to-pool and completion state; automatic GC
+// and the initial LoadSetTableFirst / scene UnloadUnusedAssets still run.
+static void patch_terrain_gc_il(void) {
+  so_module *mono = so_find_module("libmono.so");
+  const char *(*guid)(MonoImage *) = (void *)so_symbol(mono, "mono_image_get_guid");
+  MonoMethod *(*get_method)(MonoImage *, uint32_t, MonoClass *) = (void *)so_symbol(mono, "mono_get_method");
+  void *(*get_header)(MonoMethod *) = (void *)so_symbol(mono, "mono_method_get_header");
+  const uint8_t *(*get_code)(void *, uint32_t *, uint32_t *) = (void *)so_symbol(mono, "mono_method_header_get_code");
+  void (*free_header)(void *) = (void *)so_symbol(mono, "mono_metadata_free_mh");
+  const char *id = guid ? guid(game_image) : NULL;
+  if (!id || strcasecmp(id, RACE_WARMUP_MVID) || !get_method || !get_header || !get_code || !free_header) {
+    L_WARN("stage: CreateTerrain assembly/API differs; terminal GC left original");
+    return;
+  }
+  MonoMethod *method = get_method(game_image, 0x06004c98, NULL);
+  void *header = method ? get_header(method) : NULL;
+  uint32_t size = 0, stack = 0;
+  const uint8_t *code = header ? get_code(header, &size, &stack) : NULL;
+  if (code && size == sizeof(terrain_create_il) && !memcmp(code, terrain_create_il, size)) {
+    static const uint8_t nops[5];
+    kuKernelCpuUnrestrictedMemcpy((void *)(code + 0x2c9), nops, sizeof(nops));
+    kuKernelFlushCaches((void *)(code + 0x2c9), sizeof(nops));
+    L_INFO("stage: CreateTerrain terminal forced GC removed (automatic and scene cleanup preserved)");
+  } else L_WARN("stage: CreateTerrain IL differs; terminal GC left original");
   if (header) free_header(header);
 }
 
@@ -672,6 +743,31 @@ static void observe_mono_label(MonoObject *value, char *out, unsigned cap) {
   snprintf(out, cap, "%s", utf8 ? utf8 : "(unnamed)");
   if (utf8) api.mono_free(utf8);
 }
+
+// The game's LightMode also requests 30 fps. Keep its visual settings but
+// request the display's 60 Hz budget during the race, including after resets.
+// Resolve native icalls so the regular poll does not allocate managed objects.
+static void race_frame_rate_tick(void) {
+  static int (*get_rate)(void);
+  static void (*set_rate)(int);
+  if (!get_rate || !set_rate) {
+    so_module *mono = so_find_module("libmono.so"), *unity = so_find_module("libunity.so");
+    void *(*lookup)(MonoMethod *) = (void *)so_symbol(mono, "mono_lookup_internal_call");
+    MonoClass *klass = api.class_from_name(unity_image, "UnityEngine", "Application");
+    MonoMethod *get = klass ? api.get_method(klass, "get_targetFrameRate", 0) : NULL;
+    MonoMethod *set = klass ? api.get_method(klass, "set_targetFrameRate", 1) : NULL;
+    void *a = lookup && get ? lookup(get) : NULL, *b = lookup && set ? lookup(set) : NULL;
+    if (!a || !b || so_module_at((uintptr_t)a) != unity || so_module_at((uintptr_t)b) != unity) return;
+    get_rate = a; set_rate = b;
+    L_INFO("perf: race 60 fps target ready (quality settings preserved)");
+  }
+  int before = get_rate();
+  if (before == 60) return;
+  set_rate(60);
+  static unsigned changes;
+  if (++changes <= 8 || (changes & (changes - 1)) == 0)
+    L_INFO("perf: race targetFrameRate %d -> %d (request, not measured fps)", before, get_rate());
+}
 // Native integer/boolean getters avoid managed allocations in the poll. The
 // scene name is fetched only after its integer index changes.
 void mono_observe_tick(void) {
@@ -703,8 +799,8 @@ void mono_observe_tick(void) {
     static int previous = -1;
     static unsigned polls;
     int touches = get_touch_count();
-    if ((touches > 6 && touches != previous) || ++polls % 40 == 0)
-      L_INFO("input: engine touchCount %d (bridge max 6)", touches);
+    if ((touches > 8 && touches != previous) || ++polls % 40 == 0)
+      L_INFO("input: engine touchCount %d (bridge max 8)", touches);
     previous = touches;
   }
   int level = get_level();
@@ -712,7 +808,26 @@ void mono_observe_tick(void) {
     observe_mono_label(call("Application", "get_loadedLevelName", NULL, NULL, 0), name, sizeof(name));
     previous_level = level;
   }
-  observe_phase(name, is_loading());
+  int loading = is_loading();
+  if (!input_time_scale) {
+    so_module *mono = so_find_module("libmono.so"), *unity = so_find_module("libunity.so");
+    void *(*lookup)(MonoMethod *) = (void *)so_symbol(mono, "mono_lookup_internal_call");
+    MonoClass *time = api.class_from_name(unity_image, "UnityEngine", "Time");
+    MonoMethod *get = time ? api.get_method(time, "get_timeScale", 0) : NULL;
+    void *fn = get && lookup ? lookup(get) : NULL;
+    if (fn && so_module_at((uintptr_t)fn) == unity) {
+      input_time_scale = (input_time_getter)fn;
+      L_INFO("input: native race/pause gate ready for item and character buttons");
+    } else {
+      static int warned;
+      if (!warned++) L_WARN("input: Time.get_timeScale unavailable; item/change touch shortcuts disabled");
+    }
+  }
+  input_race_scene = !loading && !strcmp(name, "s_playingstage");
+  mono_input_tick();
+  managed_trace_focus(!loading && !strcmp(name, "s_playingstage") ? ui_panel_late_method : NULL);
+  if (!loading && !strcmp(name, "s_playingstage")) race_frame_rate_tick();
+  observe_phase(name, loading);
 }
 
 // Profile asset creation at the internal-call boundary. Keep arguments,
@@ -776,6 +891,57 @@ static MonoObject *traced_unload(void) {
 static MonoObject *(*bundle_load_native)(MonoObject *, MonoObject *, MonoObject *);
 static MonoObject *(*bundle_async_native)(MonoObject *, MonoObject *, MonoObject *);
 static MonoObject *(*scene_load_native)(MonoObject *, int, uint8_t, uint8_t);
+
+// Compile ahead of the first race on Unity's main thread, after all IL
+// optimizations are installed. mono_compile_method creates native code; it
+// does not invoke the gameplay methods. No background Mono/Unity calls and
+// no constructed enemies, rewards, effects or scene objects are needed.
+static void race_jit_warmup(void) {
+  static MonoDomain *prepared_domain;
+  static unsigned next;
+  static int disabled;
+  if (disabled || !game_image) return;
+  MonoDomain *domain = api.domain_get();
+  if (!domain) return;
+  if (prepared_domain != domain) { prepared_domain = domain; next = 0; }
+  const unsigned count = sizeof(race_warmup_methods) / sizeof(*race_warmup_methods);
+  if (next == count) return;
+  so_module *mono = so_find_module("libmono.so");
+  const char *(*guid)(MonoImage *) = (void *)so_symbol(mono, "mono_image_get_guid");
+  MonoMethod *(*get_method)(MonoImage *, uint32_t, MonoClass *) = (void *)so_symbol(mono, "mono_get_method");
+  void *(*get_header)(MonoMethod *) = (void *)so_symbol(mono, "mono_method_get_header");
+  const uint8_t *(*get_code)(void *, uint32_t *, uint32_t *) = (void *)so_symbol(mono, "mono_method_header_get_code");
+  void (*free_header)(void *) = (void *)so_symbol(mono, "mono_metadata_free_mh");
+  const char *id = guid ? guid(game_image) : NULL;
+  if (!get_method || !get_header || !get_code || !free_header || !id || strcasecmp(id, RACE_WARMUP_MVID)) {
+    disabled = 1;
+    L_WARN("jit: race precompile unavailable or assembly MVID differs; first-call JIT preserved");
+    return;
+  }
+  uint64_t start = sceKernelGetProcessTimeWide();
+  unsigned compiled = 0, skipped = 0, failed = 0;
+  L_INFO("jit: race precompile begin %u/%u (loading only)", next, count);
+  while (next < count) {
+    // Warming cold code consumes native memory. Leave the same 64 MiB
+    // reserve used by GC pacing for Unity's subsequent asset allocations.
+    if ((next & 31) == 0 && native_heap_available().total_free < 64u * 1024 * 1024) break;
+    MonoMethod *method = get_method(game_image, race_warmup_methods[next].token, NULL);
+    void *header = method ? get_header(method) : NULL;
+    uint32_t size = 0, stack = 0;
+    const uint8_t *code = header ? get_code(header, &size, &stack) : NULL;
+    int valid = code && size == race_warmup_methods[next].il_size;
+    if (header) free_header(header);
+    if (valid) {
+      if (api.compile_method(method)) compiled++; else failed++;
+    } else skipped++;
+    next++;
+    if ((next & 255) == 0) L_INFO("jit: race precompile progress %u/%u", next, count);
+  }
+  L_INFO("jit: race precompile %s %u/%u compiled %u skipped %u failed %u in %.2f ms native free %u KiB",
+         next == count ? "complete" : "memory-limited", next, count, compiled, skipped, failed,
+         (sceKernelGetProcessTimeWide() - start) / 1000.0,
+         (unsigned)(native_heap_available().total_free / 1024));
+}
 static MonoObject *traced_bundle_load(MonoObject *self, MonoObject *path, MonoObject *type) {
   char name[128]; observe_mono_label(path, name, sizeof(name));
   uint64_t start = observe_now();
@@ -793,6 +959,8 @@ static MonoObject *traced_bundle_async(MonoObject *self, MonoObject *path, MonoO
 }
 static MonoObject *traced_scene_load(MonoObject *path, int index, uint8_t additive, uint8_t complete) {
   char label[80], name[128]; observe_mono_label(path, label, sizeof(label));
+  if (!additive) { input_race_scene = 0; input_set_race_controls(0); }
+  if (!additive && !strcmp(label, "s_playingstage")) race_jit_warmup();
   snprintf(name, sizeof(name), "request:%s index=%d add=%u sync=%u", label, index, additive, complete);
   uint64_t start = observe_now();
   MonoObject *result = scene_load_native(path, index, additive, complete);
@@ -830,6 +998,29 @@ static void work_hooks_init(void) {
   L_INFO("perf: asset creation internal-call timers installed %u/8 (coverage measured by call counts)", installed);
 }
 
+// Distinguish the engine's cache lookup from CSV/URL work and filesystem
+// metadata. No cache decisions or returned booleans are changed.
+static uint8_t (*cache_version_native)(MonoObject *, int);
+static uint8_t traced_cache_version(MonoObject *url, int version) {
+  uint64_t start = work_trace_begin();
+  uint8_t result = cache_version_native(url, version);
+  work_trace_end(WORK_CACHE, start, 0, (uintptr_t)__builtin_return_address(0));
+  return result;
+}
+static void cache_timing_init(void) {
+  if (cache_version_native || !unity_image) return;
+  so_module *mono = so_find_module("libmono.so"), *unity = so_find_module("libunity.so");
+  void *(*lookup)(MonoMethod *) = (void *)so_symbol(mono, "mono_lookup_internal_call");
+  void (*add)(const char *, const void *) = (void *)so_symbol(mono, "mono_add_internal_call");
+  MonoClass *klass = api.class_from_name(unity_image, "UnityEngine", "Caching");
+  MonoMethod *method = klass ? api.get_method(klass, "IsVersionCached", 2) : NULL;
+  void *fn = method && lookup ? lookup(method) : NULL;
+  if (!fn || !add || so_module_at((uintptr_t)fn) != unity) return;
+  cache_version_native = fn;
+  add("UnityEngine.Caching::IsVersionCached", traced_cache_version);
+  L_INFO("perf: cache lookup timing %s", lookup(method) == (void *)traced_cache_version ? "installed" : "unavailable");
+}
+
 void mono_menu_fix(void) {
   static int done;
   if (done) return;
@@ -851,9 +1042,16 @@ void mono_menu_fix(void) {
   done = 1;
   L_INFO("menu: installed Facebook date guard");
   patch_stage_il();
+  patch_terrain_gc_il();
   patch_perf_il();
   patch_spawn_il();
   patch_hot_loop_il();
+  cache_timing_init();
+  patch_ui_trim_il();
+  ui_geometry_install(game_image);
+  MonoClass *panel = api.class_from_name(game_image, "", "UIPanel");
+  ui_panel_late_method = panel ? api.get_method(panel, "LateUpdate", 0) : NULL;
+  if (ui_panel_late_method) L_INFO("perf: gameplay callback timing focuses on UIPanel; other callbacks forward without clocks");
   L_INFO("mem: original menu image loaders restored (0.0.42 image patch disabled)");
   klass = api.class_from_name(game_image, "", "SoundManager");
   method = klass ? api.get_method(klass, "OutputPlayLog", 1) : NULL;
@@ -1020,7 +1218,7 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
     manual_total += manual_delta;
   } else manual_initialized = 0;
   static uint64_t worst_frame_us, worst_extra_us;
-  static unsigned clone_calls, resource_calls, image_calls, unload_calls;
+  static unsigned clone_calls, resource_calls, image_calls, unload_calls, managed_calls;
   static gc_trace_sample worst_gc;
   work_sample work;
   work_trace_take(&work);
@@ -1028,6 +1226,7 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
   resource_calls += work.counter[WORK_RESOURCE].calls;
   image_calls += work.counter[WORK_IMAGE].calls;
   unload_calls += work.counter[WORK_UNLOAD].calls;
+  managed_calls += work.counter[WORK_MANAGED].calls;
   gl_perf_sample graphics;
   gl_perf_take(&graphics);
   gc_trace_sample samples[16];
@@ -1065,9 +1264,16 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
     }
     for (unsigned k = 0; k < WORK_KINDS; k++) {
       work_counter *c = &work.counter[k];
+      if (k == WORK_MANAGED) {
+        char label[160];
+        jit_method_label((MonoMethod *)c->caller, label, sizeof(label));
+        L_INFO("perf: main managed-callbacks %.2f ms calls %u longest %.2f ms %s", c->us / 1000.0,
+               c->calls, c->longest_us / 1000.0, label);
+        continue;
+      }
       so_module *m = so_module_at(c->caller);
       L_INFO("perf: main %s %.2f ms calls %u bytes %llu longest %.2f ms caller %s+0x%X",
-             k == WORK_IO ? "file-io" : k == WORK_WAIT ? "wait" : k == WORK_CLONE ? "instantiate" : k == WORK_RESOURCE ? "resources-load" : k == WORK_IMAGE ? "www-texture" : "unload-unused", c->us / 1000.0, c->calls,
+             k == WORK_IO ? "file-io" : k == WORK_WAIT ? "wait" : k == WORK_CLONE ? "instantiate" : k == WORK_RESOURCE ? "resources-load" : k == WORK_IMAGE ? "www-texture" : k == WORK_META ? "filesystem-meta" : k == WORK_CACHE ? "cache-lookup" : "unload-unused", c->us / 1000.0, c->calls,
              (unsigned long long)c->bytes, c->longest_us / 1000.0,
              m ? m->name : "native", (unsigned)(m ? c->caller - m->base : c->caller));
     }
@@ -1086,6 +1292,9 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
            worst_gc.reclaim_us / 1000.0, worst_gc.restart_us / 1000.0);
     L_INFO("gc: explicit requests in window %u available %d", manual_total, manual_available);
     L_INFO("perf: asset call coverage instantiate %u resources-load %u www-texture %u unload-unused %u", clone_calls, resource_calls, image_calls, unload_calls);
+    L_INFO("perf: managed callback coverage %u outer calls", managed_calls);
+    L_INFO("ui: geometry bulk appends %u original fallbacks %u", ui_geometry_fast_calls(), ui_geometry_fallback_calls());
+    managed_calls = 0;
     clone_calls = resource_calls = image_calls = unload_calls = 0;
     manual_total = 0;
     native_heap_sample native = native_heap_available();

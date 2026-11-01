@@ -131,6 +131,8 @@ int main(void) {
   scePowerSetBusClockFrequency(222);
   scePowerSetGpuClockFrequency(222);
   scePowerSetGpuXbarClockFrequency(166);
+  L_INFO("cpu: clocks CPU %d BUS %d GPU %d XBAR %d MHz", scePowerGetArmClockFrequency(),
+         scePowerGetBusClockFrequency(), scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
 
   SceAppUtilInitParam init_param;
   SceAppUtilBootParam boot_param;

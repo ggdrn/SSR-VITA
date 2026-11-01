@@ -10,6 +10,7 @@
 #include "../util/log.h"
 
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +125,7 @@ typedef struct conn_s {
   uint8_t buf[8192];
   size_t pos, len;
   uint64_t idle_since;
+  uint64_t dns_us, tcp_us, tls_us;
 } conn;
 
 static int sock_send(void *ctx, const unsigned char *buf, size_t len) {
@@ -143,6 +145,7 @@ static int conn_open(conn *c, const char *host, int port, int tls, char *err, si
   c->port = port;
   char port_str[8];
   snprintf(port_str, sizeof(port_str), "%d", port);
+  uint64_t phase_start = sceKernelGetProcessTimeWide();
   struct addrinfo hints, *res = NULL;
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_INET;
@@ -151,6 +154,8 @@ static int conn_open(conn *c, const char *host, int port, int tls, char *err, si
     snprintf(err, err_size, "cannot resolve %s", host);
     return -1;
   }
+  c->dns_us = sceKernelGetProcessTimeWide() - phase_start;
+  phase_start = sceKernelGetProcessTimeWide();
   c->fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
   if (c->fd < 0 || connect(c->fd, res->ai_addr, res->ai_addrlen) < 0) {
     snprintf(err, err_size, "cannot connect to %s:%d", host, port);
@@ -158,6 +163,9 @@ static int conn_open(conn *c, const char *host, int port, int tls, char *err, si
     return -1;
   }
   freeaddrinfo(res);
+  c->tcp_us = sceKernelGetProcessTimeWide() - phase_start;
+  int no_delay = 1;
+  setsockopt(c->fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay));
   struct timeval tv = {IO_TIMEOUT_S, 0};
   setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -168,6 +176,7 @@ static int conn_open(conn *c, const char *host, int port, int tls, char *err, si
     snprintf(err, err_size, "TLS not initialised");
     return -1;
   }
+  phase_start = sceKernelGetProcessTimeWide();
   c->tls = 1;
   mbedtls_ssl_init(&c->ssl);
   int r = mbedtls_ssl_setup(&c->ssl, &tls_conf);
@@ -190,6 +199,7 @@ static int conn_open(conn *c, const char *host, int port, int tls, char *err, si
       return -1;
     }
   }
+  c->tls_us = sceKernelGetProcessTimeWide() - phase_start;
   L_DEBUG("tls: %s connected (%s, %s)", host, mbedtls_ssl_get_version(&c->ssl), mbedtls_ssl_get_ciphersuite(&c->ssl));
   return 0;
 }
@@ -367,6 +377,7 @@ static int has_header(const http_header *h, int n, const char *name) {
 static int send_request(conn *c, const char *method, const url_parts *u, const http_header *headers, int num_headers,
                         const void *body, size_t body_len) {
   char *req = malloc(8192 + 64 * num_headers + 4096);
+  if (!req) return -1;
   int n = 0;
   int default_port = u->port == (u->tls ? 443 : 80);
   n += sprintf(req + n, "%s %s HTTP/1.1\r\nHost: %s", method, u->path, u->host);
@@ -385,9 +396,18 @@ static int send_request(conn *c, const char *method, const url_parts *u, const h
     n += sprintf(req + n, "Content-Length: %u\r\n", (unsigned)body_len);
   }
   n += sprintf(req + n, "\r\n");
-  int r = conn_write(c, req, n);
+  // A small POST used to be two TLS records / TCP writes. Send its exact
+  // header and body together to avoid Nagle/delayed-ACK latency on Wi-Fi.
+  int combined = body && body_len && body_len <= 8192;
+  if (combined) {
+    char *whole = realloc(req, (size_t)n + body_len);
+    if (!whole) { free(req); return -1; }
+    req = whole;
+    memcpy(req + n, body, body_len);
+  }
+  int r = conn_write(c, req, (size_t)n + (combined ? body_len : 0));
   free(req);
-  if (r == 0 && body && body_len)
+  if (r == 0 && !combined && body && body_len)
     r = conn_write(c, body, body_len);
   return r;
 }
@@ -411,6 +431,8 @@ static int http_request_impl(const char *method, const char *url, const http_hea
     // if it fails before the status line, retry once on a fresh one.
     conn *c = NULL;
     char line[4096];
+    int final_reused = 0;
+    uint64_t request_start = 0, first_us = 0;
     for (int attempt = 0; attempt < 2; attempt++) {
       c = (attempt == 0 && pool_ready) ? pool_take(u.host, u.port, u.tls) : NULL;
       int reused = c != NULL;
@@ -421,6 +443,8 @@ static int http_request_impl(const char *method, const char *url, const http_hea
           return -1;
         }
       }
+      final_reused = reused;
+      request_start = sceKernelGetProcessTimeWide();
       if (send_request(c, cur_method, &u, headers, num_headers, body, body_len) == 0 &&
           read_line(c, line, sizeof(line)) >= 0 && strncmp(line, "HTTP/", 5) == 0)
         break;
@@ -435,6 +459,8 @@ static int http_request_impl(const char *method, const char *url, const http_hea
       snprintf(err, err_size, "no HTTP response from %s", u.host);
       return -1;
     }
+    first_us = sceKernelGetProcessTimeWide() - request_start;
+    uint64_t body_start = sceKernelGetProcessTimeWide();
     int keep_alive = strncmp(line, "HTTP/1.0", 8) != 0;
     int code = atoi(strchr(line, ' ') ? strchr(line, ' ') + 1 : "0");
     char status[256];
@@ -544,6 +570,10 @@ static int http_request_impl(const char *method, const char *url, const http_hea
         }
       }
     }
+    L_INFO("http: transport host=%s reused=%d dns=%.2f tcp=%.2f tls=%.2f request-status=%.2f response=%.2f ms",
+      u.host, final_reused, final_reused ? 0.0 : c->dns_us / 1000.0,
+      final_reused ? 0.0 : c->tcp_us / 1000.0, final_reused ? 0.0 : c->tls_us / 1000.0,
+      first_us / 1000.0, (sceKernelGetProcessTimeWide() - body_start) / 1000.0);
     if (keep_alive && complete && ok && pool_ready)
       pool_put(c);
     else

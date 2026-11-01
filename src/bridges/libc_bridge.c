@@ -501,7 +501,11 @@ int stat_bridge(const char *path, bionic_stat *out) {
   char buf[512];
   const char *p = fs_translate(path, buf, sizeof(buf));
   struct stat st;
-  if (stat(p, &st) < 0) {
+  uint64_t meta_start = work_trace_begin();
+  int result = stat(p, &st), saved_errno = errno;
+  work_trace_end(WORK_META, meta_start, 0, (uintptr_t)__builtin_return_address(0));
+  errno = saved_errno;
+  if (result < 0) {
     SET_ERRNO();
     return -1;
   }
@@ -546,7 +550,11 @@ int access_bridge(const char *path, int mode) {
   char buf[512];
   const char *p = fs_translate(path, buf, sizeof(buf));
   struct stat st;
-  if (stat(p, &st) < 0) {
+  uint64_t meta_start = work_trace_begin();
+  int result = stat(p, &st), saved_errno = errno;
+  work_trace_end(WORK_META, meta_start, 0, (uintptr_t)__builtin_return_address(0));
+  errno = saved_errno;
+  if (result < 0) {
     *__errno_bionic() = ENOENT;
     return -1;
   }
@@ -613,7 +621,10 @@ typedef struct {
 void *opendir_bridge(const char *path) {
   char buf[512];
   const char *p = fs_translate(path, buf, sizeof(buf));
-  DIR *d = opendir(p);
+  uint64_t meta_start = work_trace_begin();
+  DIR *d = opendir(p); int saved_errno = errno;
+  work_trace_end(WORK_META, meta_start, 0, (uintptr_t)__builtin_return_address(0));
+  errno = saved_errno;
   if (!d) {
     SET_ERRNO();
     return NULL;
@@ -624,7 +635,10 @@ void *opendir_bridge(const char *path) {
 }
 
 bionic_dirent *readdir_bridge(bionic_DIR *bd) {
-  struct dirent *e = readdir(bd->dir);
+  uint64_t meta_start = work_trace_begin();
+  struct dirent *e = readdir(bd->dir); int saved_errno = errno;
+  work_trace_end(WORK_META, meta_start, 0, (uintptr_t)__builtin_return_address(0));
+  errno = saved_errno;
   if (!e)
     return NULL;
   memset(&bd->ent, 0, sizeof(bd->ent));

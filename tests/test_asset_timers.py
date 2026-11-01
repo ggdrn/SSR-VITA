@@ -15,7 +15,8 @@ with zipfile.ZipFile(root.parent/'srr224.apk') as z:
  native=z.read('lib/armeabi-v7a/libunity.so')
  for name in ('UnityEngine.Object::Internal_CloneSingle','UnityEngine.Object::INTERNAL_CALL_Internal_InstantiateSingle','UnityEngine.Resources::Load','UnityEngine.WWW::GetTexture','UnityEngine.Resources::UnloadUnusedAssets','UnityEngine.AssetBundle::Load','UnityEngine.AssetBundle::LoadAsync','UnityEngine.Application::LoadLevelAsync'):
   assert (name+'\0').encode() in native
-src=(root/'src/mono_probe.c').read_text();a=src.index('// Profile asset creation');b=src.index('void mono_menu_fix(',a)
+src=(root/'src/mono_probe.c').read_text();a=src.index('// Profile asset creation');b=src.index('// Distinguish the engine',a)
+snippet=src[a:src.index('// Compile ahead',a)]+src[src.index('static MonoObject *traced_bundle_load',a):b]
 h=r'''#include "util/work_trace.h"
 #include "util/observe.h"
 #include <assert.h>
@@ -25,7 +26,9 @@ h=r'''#include "util/work_trace.h"
 #include <stdlib.h>
 typedef void MonoObject,MonoMethod,MonoClass;
 typedef int so_module;static so_module mono,unity,foreign;
-static int unity_image=1,bad,adds,originals,ended;
+static int unity_image=1,bad,adds,originals,ended,input_race_scene;
+static void input_set_race_controls(int on){}
+static void race_jit_warmup(void){}
 static void *mapping[8];
 static void *arg1=(void *)101,*arg2=(void *)102,*arg3=(void *)103;
 static void observe_mono_label(MonoObject *o,char *s,unsigned n){snprintf(s,n,"asset");}
@@ -50,7 +53,7 @@ static void *lookup(MonoMethod *m){return mapping[(uintptr_t)m-1];}
 static void add(const char *name,const void *fn){adds++;if(strstr(name,"AssetBundle::LoadAsync"))mapping[6]=(void *)fn;else if(strstr(name,"AssetBundle::Load"))mapping[5]=(void *)fn;else if(strstr(name,"Application::LoadLevelAsync"))mapping[7]=(void *)fn;else if(strstr(name,"Internal_CloneSingle"))mapping[0]=(void *)fn;else if(strstr(name,"Internal_InstantiateSingle"))mapping[1]=(void *)fn;else if(strstr(name,"::Load"))mapping[2]=(void *)fn;else if(strstr(name,"::GetTexture"))mapping[3]=(void *)fn;else mapping[4]=(void *)fn;}
 static uintptr_t so_symbol(so_module *m,const char *name){return !strcmp(name,"mono_lookup_internal_call")?(uintptr_t)lookup:(uintptr_t)add;}
 #define L_INFO(...) ((void)0)
-'''+src[a:b]+r'''
+'''+snippet+r'''
 int main(int argc,char **argv){
  mapping[0]=clone;mapping[1]=instantiate;mapping[2]=load;mapping[3]=texture;mapping[4]=unload;mapping[5]=bundle;mapping[6]=bundle_async;mapping[7]=scene;bad=argc>1;
  work_hooks_init();work_hooks_init();

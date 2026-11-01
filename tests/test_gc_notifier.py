@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 src = (Path(__file__).resolve().parents[1]/'src/mono_probe.c').read_text()
 a = src.index('static void (*original_gc_event)(int);')
-b = src.index('static int probe_init(void)',a)
+b = src.index('// Diagnostic: race hitches',a)
 harness = r'''
 #include <stdint.h>
 #include <stddef.h>

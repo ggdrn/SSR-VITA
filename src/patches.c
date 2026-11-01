@@ -5,6 +5,7 @@
 #include "loader/so_util.h"
 #include "util/log.h"
 #include "util/gc_policy.h"
+#include "util/managed_trace.h"
 #include "ui_mesh.h"
 
 #include <string.h>
@@ -72,4 +73,5 @@ void apply_patches(void) {
   }
   if (mono) install_gc_pacing(mono);
   ui_mesh_install();
+  managed_trace_install();
 }

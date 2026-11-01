@@ -42,11 +42,13 @@ void signal_init(void);
 // Runs signals queued for the calling thread by pthread_kill(); called from
 // every blocking bridge. Returns how many handlers ran.
 int signal_poll(void);
+void signal_forget_thread(int uid);
 int signal_pending_self(void);
 
 // input_bridge.c
 void input_init(void);
 void input_poll(void);
+void input_set_race_controls(int enabled);
 
 // ime_bridge.c: Vita IME dialog behind Unity's TouchScreenKeyboard.
 void ime_show(const char *text, int type, int multiline, int secure, const char *placeholder);

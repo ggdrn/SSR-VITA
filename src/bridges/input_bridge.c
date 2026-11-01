@@ -4,8 +4,8 @@
 // Unity reads input through AInputQueue/AMotionEvent/AKeyEvent, so we keep a
 // small ring of synthetic events that the looper reports as ready.
 //
-// Sonic Runners is touch-only: Cross/Circle also inject a tap in the middle of
-// the screen (jump), and Start/Select map to the Android BACK key.
+// Cross/Circle inject a central tap/hold. Square/Triangle target the race
+// HUD; L/Start/Select share Android BACK for pause and menu navigation.
 
 #include "bridges.h"
 #include "../config.h"
@@ -44,7 +44,7 @@
 #define AKEYCODE_BUTTON_START 108
 #define AKEYCODE_BUTTON_SELECT 109
 
-#define MAX_POINTERS 6
+#define MAX_POINTERS 8
 #define QUEUE_SIZE 64
 
 typedef struct {
@@ -211,8 +211,12 @@ static touch_slot slots[MAX_POINTERS];
 static uint32_t prev_buttons;
 static int64_t touch_down_time;
 
-// Virtual tap pointer driven by Cross/Circle.
-#define VIRTUAL_TAP_SLOT (MAX_POINTERS - 1)
+// Five physical fingers and independent virtual jump/item/change pointers.
+#define VIRTUAL_TAP_SLOT 5
+#define ITEM_TAP_SLOT 6
+#define CHANGE_TAP_SLOT 7
+static int race_controls;
+void input_set_race_controls(int enabled) { race_controls = enabled; }
 
 static void build_motion(input_event *e, int action) {
   memset(e, 0, sizeof(*e));
@@ -296,11 +300,27 @@ static const struct {
 } key_map[] = {
     {SCE_CTRL_CROSS, AKEYCODE_BUTTON_A},       {SCE_CTRL_CIRCLE, AKEYCODE_BUTTON_B},
     {SCE_CTRL_SQUARE, AKEYCODE_BUTTON_X},      {SCE_CTRL_TRIANGLE, AKEYCODE_BUTTON_Y},
-    {SCE_CTRL_LTRIGGER, AKEYCODE_BUTTON_L1},   {SCE_CTRL_RTRIGGER, AKEYCODE_BUTTON_R1},
+    {SCE_CTRL_RTRIGGER, AKEYCODE_BUTTON_R1},
     {SCE_CTRL_UP, AKEYCODE_DPAD_UP},           {SCE_CTRL_DOWN, AKEYCODE_DPAD_DOWN},
     {SCE_CTRL_LEFT, AKEYCODE_DPAD_LEFT},       {SCE_CTRL_RIGHT, AKEYCODE_DPAD_RIGHT},
-    {SCE_CTRL_START, AKEYCODE_BACK},           {SCE_CTRL_SELECT, AKEYCODE_BACK},
 };
+
+static void update_virtual_buttons(uint32_t buttons, uint32_t previous) {
+  const struct { uint32_t button; int slot; float x; } actions[] = {
+    {SCE_CTRL_SQUARE, ITEM_TAP_SLOT, SCREEN_W * (300.0f / 960.0f)},
+    {SCE_CTRL_TRIANGLE, CHANGE_TAP_SLOT, SCREEN_W * (675.0f / 960.0f)}
+  };
+  for (unsigned i = 0; i < sizeof(actions) / sizeof(*actions); i++) {
+    int slot = actions[i].slot;
+    if (slots[slot].active && (!race_controls || !(buttons & actions[i].button))) pointer_up(slot);
+    if (race_controls && (buttons & actions[i].button) && !(previous & actions[i].button))
+      pointer_down(slot, actions[i].x, SCREEN_H * (480.0f / 544.0f));
+  }
+  // Pause/back is shared by L, Start and Select. Aggregate them so pressing
+  // two does not toggle twice or release BACK while another is still held.
+  const uint32_t back = SCE_CTRL_LTRIGGER | SCE_CTRL_START | SCE_CTRL_SELECT;
+  if (!!(buttons & back) != !!(previous & back)) push_key(AKEYCODE_BACK, buttons & back);
+}
 
 void input_poll(void) {
   // Touch: front panel is 1920x1088.
@@ -354,6 +374,8 @@ void input_poll(void) {
   else if (!tap && prev_tap && slots[VIRTUAL_TAP_SLOT].active)
     pointer_up(VIRTUAL_TAP_SLOT);
 
+  update_virtual_buttons(pad.buttons, prev_buttons);
+
   prev_buttons = pad.buttons;
   static unsigned last_overflows;
   if (input_overflows != last_overflows) {
@@ -367,4 +389,5 @@ void input_init(void) {
   sceKernelCreateLwMutex(&q_lock, "input", 0, 0, NULL);
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
   sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+  L_INFO("input: X/Circle touch; Square item; Triangle character; L/Start/Select pause/back (8 pointer slots)");
 }

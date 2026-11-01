@@ -274,27 +274,63 @@ typedef struct thread_slot {
   SceUID uid;
   void *(*func)(void *);
   void *arg;
+  int detached, exited;
+  uint64_t generation;
 } thread_slot;
 
 #define MAX_THREADS 128
 static thread_slot threads[MAX_THREADS];
+static unsigned threads_created, threads_released, threads_tracked, threads_high_water;
+static uint64_t threads_generation;
 
 // Accepts either the pthread_t or the kernel thread UID.
+// Caller holds init_lock; never retain this pointer after unlocking.
 static thread_slot *slot_find(pthread_t t) {
-  for (int i = 0; i < MAX_THREADS; i++) {
-    if (threads[i].func && (threads[i].thread == t || (threads[i].uid && threads[i].uid == (SceUID)t)))
-      return &threads[i];
-  }
+  thread_slot *found = NULL;
+  // A native join can free its handle just before the old bridge record is
+  // retired. If another creator reuses that handle, prefer its new record.
+  for (int i = 0; i < MAX_THREADS; i++)
+    if (threads[i].func && threads[i].thread == t &&
+        (!found || threads[i].generation > found->generation)) found = &threads[i];
+  if (found) return found;
+  for (int i = 0; i < MAX_THREADS; i++)
+    if (threads[i].func && threads[i].uid && threads[i].uid == (SceUID)t) return &threads[i];
   return NULL;
+}
+
+static void forget_self_locked(pthread_t thread);
+static void slot_release(thread_slot *s) {
+  memset(s, 0, sizeof(*s));
+  threads_tracked--;
+  threads_released++;
+}
+
+// Native cleanup runs for normal return and pthread_exit. A joinable thread
+// retains its handle until joined; detached metadata can be reused at exit.
+static void thread_finished(void *arg) {
+  thread_slot *s = arg;
+  signal_forget_thread(sceKernelGetThreadId());
+  global_lock();
+  forget_self_locked(pthread_self());
+  s->exited = 1;
+  if (s->detached) slot_release(s);
+  global_unlock();
 }
 
 static void *thread_trampoline(void *arg) {
   thread_slot *s = arg;
+  global_lock();
   s->uid = sceKernelGetThreadId();
-  // Let game threads run on any user core, so one busy-waiting thread can't
-  // starve the thread it waits for.
-  sceKernelChangeThreadCpuAffinityMask(s->uid, thread_cpu_mask());
-  return s->func(s->arg);
+  SceUID uid = s->uid;
+  void *(*func)(void *) = s->func;
+  void *data = s->arg;
+  global_unlock();
+  sceKernelChangeThreadCpuAffinityMask(uid, thread_cpu_mask());
+  void *result;
+  pthread_cleanup_push(thread_finished, s);
+  result = func(data);
+  pthread_cleanup_pop(1);
+  return result;
 }
 
 int pthread_attr_init_bridge(bionic_attr *a) {
@@ -333,38 +369,46 @@ int pthread_attr_getstack_bridge(const bionic_attr *a, void **addr, size_t *size
 }
 
 int pthread_create_bridge(pthread_t *out, const bionic_attr *battr, void *(*func)(void *), void *arg) {
+  if (!out || !func) return B_EINVAL;
   thread_slot *s = NULL;
   global_lock();
   for (int i = 0; i < MAX_THREADS; i++) {
-    if (!threads[i].func) {
-      s = &threads[i];
-      s->func = func;
-      break;
-    }
+    if (!threads[i].func) { s = &threads[i]; break; }
   }
-  global_unlock();
   if (!s) {
-    L_ERROR("pthread_create: thread table full");
-    return 11;  // EAGAIN
+    unsigned live = threads_tracked, created = threads_created, released = threads_released;
+    global_unlock();
+    L_ERROR("pthread_create: thread table full (%u tracked, %u created, %u released)", live, created, released);
+    return 11;  // EAGAIN: still bounded by outstanding threads, not session length.
   }
+  memset(s, 0, sizeof(*s));
+  s->func = func;
+  s->generation = ++threads_generation;
   s->arg = arg;
-  s->uid = 0;
-
+  s->detached = battr && (battr->flags & B_ATTR_DETACHED);
+  threads_tracked++;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   size_t stack = battr && battr->stack_size > MIN_STACK ? battr->stack_size : MIN_STACK;
-  pthread_attr_setstacksize(&attr, stack);
-  if (battr && (battr->flags & B_ATTR_DETACHED))
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-  int r = pthread_create(&s->thread, &attr, thread_trampoline, s);
+  int r = pthread_attr_setstacksize(&attr, stack);
+  if (!r && s->detached) r = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  // Keep publication atomic: an immediately returning detached thread must
+  // not erase its slot before the creator has copied the native handle out.
+  if (!r) r = pthread_create(&s->thread, &attr, thread_trampoline, s);
   pthread_attr_destroy(&attr);
-  if (r != 0) {
+  if (r) {
+    slot_release(s);
+    global_unlock();
     L_ERROR("pthread_create failed: %d", r);
-    s->func = NULL;
     return r;
   }
   *out = s->thread;
-  L_DEBUG("pthread_create -> %p, entry %p", (void *)s->thread, func);
+  unsigned created = ++threads_created, live = threads_tracked, released = threads_released;
+  if (live > threads_high_water) threads_high_water = live;
+  unsigned peak = threads_high_water;
+  global_unlock();
+  if (!(created & (created - 1)))
+    L_INFO("threads: created %u tracked %u/%u high-water %u released %u", created, live, MAX_THREADS, peak, released);
   return 0;
 }
 
@@ -376,18 +420,23 @@ static struct {
   SceUID uid;
 } self_map[MAX_SELF_MAP];
 
+static void forget_self_locked(pthread_t thread) {
+  for (int i = 0; i < MAX_SELF_MAP; i++)
+    if (self_map[i].thread == thread) memset(&self_map[i], 0, sizeof(self_map[i]));
+}
 static void remember_self(void) {
   pthread_t t = pthread_self();
   SceUID uid = sceKernelGetThreadId();
+  global_lock();
+  if (slot_find(t)) { global_unlock(); return; }
   for (int i = 0; i < MAX_SELF_MAP; i++) {
-    if (self_map[i].thread == t)
-      return;
-    if (!self_map[i].thread) {
+    if (self_map[i].thread == t || !self_map[i].thread) {
       self_map[i].thread = t;
       self_map[i].uid = uid;
-      return;
+      break;
     }
   }
+  global_unlock();
 }
 
 SceUID pthread_bridge_uid_of(uint32_t id) {
@@ -395,20 +444,22 @@ SceUID pthread_bridge_uid_of(uint32_t id) {
   info.size = sizeof(info);
   if (sceKernelGetThreadInfo((SceUID)id, &info) >= 0)
     return (SceUID)id;  // already a kernel UID (gettid/tkill)
+  global_lock();
   thread_slot *s = slot_find((pthread_t)id);
-  if (s && s->uid)
-    return s->uid;
-  for (int i = 0; i < MAX_SELF_MAP; i++) {
-    if (self_map[i].thread == (pthread_t)id)
-      return self_map[i].uid;
-  }
-  return 0;
+  SceUID uid = s ? s->uid : 0;
+  for (int i = 0; !uid && i < MAX_SELF_MAP; i++)
+    if (self_map[i].thread == (pthread_t)id) uid = self_map[i].uid;
+  global_unlock();
+  return uid;
 }
 
 // Guest start routine of a thread created through pthread_create (for logs).
 uintptr_t pthread_bridge_entry_of(uint32_t thread) {
+  global_lock();
   thread_slot *s = slot_find((pthread_t)thread);
-  return s ? (uintptr_t)s->func : 0;
+  uintptr_t entry = s ? (uintptr_t)s->func : 0;
+  global_unlock();
+  return entry;
 }
 
 int pthread_getattr_np_bridge(pthread_t t, bionic_attr *a) {
@@ -417,9 +468,10 @@ int pthread_getattr_np_bridge(pthread_t t, bionic_attr *a) {
   if (t == pthread_self()) {
     uid = sceKernelGetThreadId();
   } else {
+    global_lock();
     thread_slot *s = slot_find(t);
-    if (s)
-      uid = s->uid;
+    if (s) uid = s->uid;
+    global_unlock();
   }
   SceKernelThreadInfo info;
   memset(&info, 0, sizeof(info));
@@ -431,26 +483,50 @@ int pthread_getattr_np_bridge(pthread_t t, bionic_attr *a) {
   return 0;
 }
 
-int pthread_detach_bridge(pthread_t t) { return pthread_detach(t); }
-// Waits for the thread's end in slices (taking queued signals) before the
-// real join, which then returns immediately.
-int pthread_join_bridge(pthread_t t, void **ret) {
-  WAIT_BEGIN("join", (void *)t);
+int pthread_detach_bridge(pthread_t t) {
+  global_lock();
   thread_slot *s = slot_find(t);
+  int r = pthread_detach(t);
+  if (!r && s) {
+    s->detached = 1;
+    if (s->exited) slot_release(s);
+  }
+  global_unlock();
+  return r;
+}
+// Wait in slices so queued cooperative GC signals still run. Successful join
+// retires the metadata; a failed join must preserve the original handle.
+int pthread_join_bridge(pthread_t t, void **ret) {
+  global_lock();
+  thread_slot *s = slot_find(t);
+  int detached = s && s->detached;
+  thread_slot *joined = s;
+  uint64_t generation = s ? s->generation : 0;
+  global_unlock();
+  if (detached) return B_EINVAL;
+  WAIT_BEGIN("join", (void *)t);
   for (;;) {
+    global_lock();
+    s = slot_find(t);
     SceUID uid = s ? s->uid : (SceUID)t;
+    global_unlock();
     if (uid) {
       SceUInt timeout = SLICE_NS / 1000;
       int r = sceKernelWaitThreadEnd(uid, NULL, &timeout);
-      if (r != (int)SCE_KERNEL_ERROR_WAIT_TIMEOUT)
-        break;
+      if (r != (int)SCE_KERNEL_ERROR_WAIT_TIMEOUT) break;
     } else {
-      sceKernelDelayThread(SLICE_NS / 1000);  // trampoline hasn't recorded the UID yet
+      sceKernelDelayThread(SLICE_NS / 1000);
     }
     signal_poll();
   }
   thread_wait_end();
-  return pthread_join(t, ret);
+  int r = pthread_join(t, ret);
+  if (!r) {
+    global_lock();
+    if (joined && joined->func && joined->generation == generation) slot_release(joined);
+    global_unlock();
+  }
+  return r;
 }
 void pthread_exit_bridge(void *ret) { pthread_exit(ret); }
 pthread_t pthread_self_bridge(void) {

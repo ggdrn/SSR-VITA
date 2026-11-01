@@ -6,6 +6,8 @@
 #include "log.h"
 #include "work_trace.h"
 #include "observe.h"
+#include "title_layout.h"
+#include "splash_art.h"
 
 #include <psp2/io/fcntl.h>
 #include <psp2/kernel/threadmgr.h>
@@ -91,6 +93,8 @@ int apk_open(const char *path) {
   free(cd);
   qsort(entries, num_entries, sizeof(apk_entry), entry_cmp);
   L_INFO("apk: %s indexed, %d entries", path, num_entries);
+  title_layout_prepare();
+  splash_art_prepare();
   return 0;
 }
 
@@ -170,6 +174,8 @@ void *apk_extract(const apk_entry *e, size_t *out_size) {
   }
   if (out_size)
     *out_size = e->size;
+  title_layout_apply(e, 0, out, e->size);
+  splash_art_apply(e, 0, out, e->size);
   observe_span(OBS_APK, e->name, observed_start, e->size, 0, 0);
   return out;
 
@@ -188,6 +194,8 @@ int apk_read_stored(const apk_entry *e, uint32_t pos, void *dst, uint32_t len) {
   int64_t off = apk_data_offset(e);
   if (off < 0 || pread_all(dst, len, off + pos) < 0)
     return -1;
+  title_layout_apply(e, pos, dst, len);
+  splash_art_apply(e, pos, dst, len);
   observe_span(OBS_APK, e->name, observed_start, len, 0, 0);
   return len;
 }

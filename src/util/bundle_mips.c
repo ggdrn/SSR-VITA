@@ -78,11 +78,17 @@ static unsigned parse_ranges(FILE *f, uint32_t file_size, mip_range **out) {
     if (!read_at(f, object, t, sizeof(t))) continue;
     uint32_t name = le32(t), at = (4 + name + 3) & ~3u;
     if (name > 96) continue;
+    // The optimization targets menu atlases/fonts. Gameplay textures must
+    // retain every mip even when the current global quality discards it:
+    // character/material paths can retain or reuse that source afterwards.
+    if (!((name >= 3 && !memcmp(t + 4, "ui_", 3)) ||
+          (name >= 9 && !memcmp(t + 4, "UCGothic_", 9)))) continue;
     uint32_t w = le32(t + at), h = le32(t + at + 4), complete = le32(t + at + 8), format = le32(t + at + 12);
     uint8_t mipmap = t[at + 16], readable = t[at + 17];
     uint32_t images = le32(t + at + 20), dimension = le32(t + at + 24), image = le32(t + at + 52);
     unsigned bpp = format_bpp(format);
-    if (!bpp || mipmap != 1 || readable || images != 1 || dimension != 2 || w < 2 || h < 2 || w > 4096 || h > 4096)
+    if (!bpp || mipmap != 1 || readable || images != 1 || dimension != 2 || w < 2 || h < 2 || w > 4096 || h > 4096 ||
+        (w < 512 && h < 512))
       continue;
     uint64_t chain = 0;
     for (uint32_t mw = w, mh = h;; mw = mw > 1 ? mw / 2 : 1, mh = mh > 1 ? mh / 2 : 1) {
@@ -193,6 +199,7 @@ int bundle_mips_fread(void *p, size_t size, size_t count, FILE *f, size_t *resul
     if (!r || cur >= end) break;
     uint32_t resume = r->end < end ? r->end : end;
     if (fseek(f, resume, SEEK_SET) != 0) break;
+    memset(out + (cur - pos), 0, resume - cur);
     skipped += resume - cur;
     cur = resume;
   }

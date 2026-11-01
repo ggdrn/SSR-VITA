@@ -3,5 +3,10 @@ build/
 *.vpk
 .DS_Store
 __pycache__/
+scripts/race_warmup_gen/bin/
+scripts/race_warmup_gen/obj/
 *.psp2dmp
 srr_log.txt
+
+tests/ui_trim/bin/
+tests/ui_trim/obj/

@@ -1,118 +1,170 @@
 # SRR Vita
 
-Port do **Sonic Runners Revival** (`srr224.apk`, `com.sonicrunners.revival`) para PS Vita usando um
-*so-loader*: as bibliotecas nativas ARM do APK rodam direto no Vita e cada dependência Android
-(libc bionic, GLES/EGL, OpenSL ES, libandroid, JNI/Java) é reimplementada sobre o VitaSDK + vitaGL.
+An experimental **Sonic Runners Revival** port for PlayStation Vita, based on the Android `srr224.apk` package (`com.sonicrunners.revival`).
 
-> Estado: **0.0.01, ainda não testado em hardware.** O loader compila e gera o VPK; a primeira
-> execução no console vai produzir o log que guia as próximas iterações.
+The port loads the APK's ARM native libraries directly and provides the Android interfaces they need through VitaSDK, vitaGL, and compatibility bridges. It does not rebuild the game from its original source code.
 
-## O que fica no Vita
+**Current version: 0.0.64.** Gameplay, menus, audio, and online requests have been exercised on real hardware. Performance and compatibility are still being improved; startup and some menu transitions can be slow. A constant 60 FPS is not guaranteed.
 
+## Installation
+
+1. Install a recent **kubridge.skprx** with `kuKernelMemCommit` and exception-handler support. Enable it under `*KERNEL` in your taiHEN configuration.
+2. Install **libshacccg.suprx**, for example using ShaRKBR33D.
+3. Install the VPK built from this repository.
+4. Copy your compatible game APK to `ux0:data/srr/srr224.apk`.
+5. Connect the Vita to Wi-Fi and make sure its date and time are correct before using online features.
+
+The APK and the full game data are not included. The supported APK used for development has SHA-256:
+
+```text
+50b91eaa208d46b21289a967b1d8eb71fee5a6c5861c62f732cd1447ddcf10d0
 ```
+
+The loader can locate an APK with another filename in the same directory, but the managed-code optimizations target the supported build. Compatibility checks keep the original code when a guarded patch does not match.
+
+No OBB extraction is required for this APK. The loader extracts the native libraries into memory, and Unity reads its packaged data from the APK.
+
+```text
 ux0:data/srr/
-├── srr224.apk          <- único arquivo que você copia (qualquer nome .apk serve)
-├── srr_log.txt         <- log de cada execução (criado pelo loader)
-├── files/              <- dados do jogo; files/shared_prefs/ guarda os PlayerPrefs (save)
+├── srr224.apk
+├── srr_log.txt          # Runtime diagnostics
+├── files/              # Downloaded content and game data
+│   └── shared_prefs/    # PlayerPrefs / local save preferences
 ├── cache/
 └── sdcard/
 ```
 
-Não é preciso extrair nada, nem OBB (`settings.xml` do APK tem `useObb=False`: todos os dados estão
-dentro do APK). Na inicialização o loader lê o APK, descompacta em memória as 4 `.so` de
-`lib/armeabi-v7a/` e as liga ao Vita; o Unity lê `assets/bin/Data` direto do APK, como faz no Android.
+## Controls
 
-Requisitos no console:
-- **kubridge.skprx** recente (com `kuKernelMemCommit` e `kuKernelRegisterExceptionHandler`) em `ur0:tai/`, sob `*KERNEL`.
-- **libshacccg.suprx** extraído com ShaRKBR33D (compilação de shaders GLSL em tempo real).
+| Vita input | Action |
+|---|---|
+| Cross (X) | Central screen touch; hold for the character's original touch-and-hold behavior |
+| Square | Use the item button during a race |
+| Triangle | Use the character-switch button during a race |
+| L / Start | Pause or go back |
+| Circle | Alternate central screen touch |
+| Select | Alternate back action |
+| Front touchscreen | Original touch controls and menu navigation |
 
-## Análise de viabilidade
-
-| Checagem | Resultado | Leitura |
-|---|---|---|
-| ABI ARM 32-bit | ✅ armeabi-v7a | Roda nativo no Cortex-A9. |
-| Engine | Unity **4.7.2f1**, backend **Mono** (JIT) | O JIT do Mono exige memória RWX → `kuKernelMemCommit` RWX (kubridge). |
-| Bibliotecas | `libunity` 11 MB, `libmono` 3.9 MB, `libmain`, `libcri_ware_unity` (CRI ADX2) | 733 imports únicos, todos resolvidos (`data/apk_imports.txt`). |
-| GLES "3+" (FAIL do checker) | **Falso negativo prático** | O `libunity` só importa símbolos GLES2; o caminho GLES3 é opcional e obtido via `eglGetProcAddress`. O loader recusa contexto ES3 e o Unity cai no renderer GLES2. |
-| Áudio | FMOD (Unity, via Java `FMODAudioDevice`) + CRI (OpenSL ES) | Ambos emulados sobre `sceAudioOut`. |
-| Vídeo | CRI Sofdec via `MediaCodec` | Sem `.usm` no APK; não implementado. |
-
-**Riscos principais** (em ordem):
-1. **GC do Mono (Boehm)** para o mundo com `pthread_kill` + handlers de sinal em outras threads. O Vita
-   não entrega sinais entre threads. Hoje isso é só registrado no log; se causar travamento, a saída é
-   hookar `GC_stop_world`/`GC_start_world` no `libmono`.
-2. **NullReferenceException** do Mono depende de SIGSEGV. Implementado via exception handler do
-   kubridge (`signal_bridge.c`), ainda sem validação em hardware.
-3. **Rede**: o jogo é online (servidor Revival, atrás do Cloudflare: só HTTPS, certificados ECDSA). Toda a
-   rede passa pelo `WWW` do Unity, emulado sobre um cliente HTTP/1.1 próprio + **mbedTLS 3.6**
-   (`third_party/mbedtls`, Apache-2.0), rodando inteiro no Vita — o SSL nativo do Vita não suporta
-   ECDSA. O relógio do Vita precisa estar com data/hora corretas (validade dos certificados).
-4. **Memória**: ~365 MB com `ATTRIBUTE2=12`; heap newlib de 220 MB + vitaGL.
-
-## Mapa de hardware
-
-| Android | Vita | Arquivo |
-|---|---|---|
-| EGL / GLES2 | vitaGL (GXM) + tradutor GLSL→CG | `src/bridges/gl_bridge.c` |
-| Touch (`AInputQueue`/`AMotionEvent`) | `sceTouch` (tela frontal, 1920×1088 → 960×544) | `src/bridges/input_bridge.c` |
-| Teclas | `sceCtrl`: ✕/◯ = toque no centro (pular), START/SELECT = BACK, setas/□/△/L/R = gamepad | `src/bridges/input_bridge.c` |
-| OpenSL ES (CRI) | `sceAudioOut` (portas MAIN) | `src/bridges/audio_bridge.c` |
-| FMOD Java AudioDevice (Unity) | thread + `sceAudioOut` (porta BGM) | `src/bridges/audio_bridge.c` |
-| AAssetManager | leitura direta do ZIP do APK | `src/bridges/android_bridge.c`, `src/util/apk.c` |
-| Arquivos (`/data/data/...`, `/sdcard`) | `ux0:data/srr/...` | `src/bridges/fs_bridge.c` |
-| pthread / semáforos (bionic) | pthread VitaSDK + `SceKernelSema` | `src/bridges/pthread_bridge.c` |
-| mmap/mprotect (JIT) | kubridge `MemReserve/Commit` RWX | `src/bridges/mem_bridge.c` |
-| Sinais | exception handlers do kubridge | `src/bridges/signal_bridge.c` |
-| SharedPreferences (PlayerPrefs) | arquivos em `files/shared_prefs/` | `src/jni/java_impl.c` |
-| `com.unity3d.player.WWW` (HTTP/HTTPS) | sockets `sceNet` + mbedTLS, raízes em `src/net/ca_roots.pem` | `src/net/http.c`, `src/jni/java_impl.c` |
-| Idioma (`Locale`) | idioma do sistema do Vita | `src/jni/java_impl.c` |
-| CPU/GPU | 444/222/222/166 MHz | `src/main.c` |
-
-## Arquitetura
-
-```
-src/main.c            boot: checa kubridge/libshacccg, acha o APK, carrega e liga as .so
-src/unity_boot.c      reproduz o lado Java do UnityPlayer (NativeLoader.load, initJni, nativeRender...)
-src/loader/so_util.c  loader ELF (texto RX via kubridge em endereço fixo, dados RW logo após)
-src/loader/dynlib.c   tabela de imports — GERADA por scripts/gen_dynlib.py
-src/bridges/*         compatibilidade bionic/Android sobre o Vita
-src/jni/jni.c         JVM falsa e permissiva (toda classe/método "existe"; o não implementado é logado)
-src/jni/java_impl.c   APIs Java emuladas
-```
-
-Imports sem implementação viram stubs que **logam o nome** no `srr_log.txt` e retornam 0; métodos Java
-não emulados aparecem como `jni: unimplemented Classe.metodo(sig)`. O log é a lista de tarefas.
+Item and character-switch shortcuts target the game's own race HUD, preserving availability, consumption, and cooldown rules. They are enabled outside loading while the race is running. Physical touches and the three touch shortcuts use independent pointer slots.
 
 ## Build
 
-Pré-requisitos: `$VITASDK` (hard-float; as chamadas soft-float do Android são adaptadas com
-`__attribute__((pcs("aapcs")))`) e as pastas locais ao lado deste repo:
+The project uses **VitaSDK**, CMake, and a locally built **vitaGL** checkout. Set `VITASDK` to your SDK directory and ensure its tools are available in your shell.
 
-```
-SRR - VITA/
-├── SRR-VITA/      este repositório
-├── vitaGL/        usado direto daqui (header + libvitaGL.a)
-│                 recompilado com `make HAVE_SHARK_LOG=1 HAVE_SHADER_CACHE=1` após aplicar
-│                 `patches/vitagl-link-compile-failure.patch`
-├── vitasoguide/   guia/checagem de compatibilidade
-└── vdpm/          gerenciador de pacotes do VitaSDK
-```
+Required link dependencies include vitaGL, vitaShaRK, SceShaccCgExt, mathneon, kubridge, taiHEN, pthread, and zlib. mbedTLS is vendored in `third_party/mbedtls`.
 
-```bash
-scripts/build.sh
+CMake expects vitaGL next to this repository:
+
+```text
+workspace/
+├── SSR-VITA/           # This repository; the directory name may differ
+└── vitaGL/
+    ├── source/
+    └── libvitaGL.a
 ```
 
-Cada execução incrementa o número de build e gera `build/SRR-Vita-v0.0.NN.vpk`; todos os VPKs ficam
-guardados em `build/VPK/`.
-No Vita o `param.sfo` só aceita `XX.YY`, então a mesma build aparece como `00.NN`.
-`scripts/build.sh --rebuild` recompila sem trocar o número.
+Prepare vitaGL with the compatible changes in [patches/](patches/), including shader compilation failure handling, shader caching, and texture allocation failure handling. The development checkout was based on vitaGL commit `76f43e6`; applying these patches to another revision may require adjustments. Build that checkout with:
 
-Ao mudar os bridges ou a lista de imports:
+```sh
+make -C ../vitaGL HAVE_SHARK_LOG=1 HAVE_SHADER_CACHE=1
+```
 
-```bash
+Then build the port from the repository root:
+
+```sh
+./scripts/build.sh --rebuild
+```
+
+This preserves `VERSION` and produces the current package in:
+
+```text
+build/VPK/SRR-Vita-v0.0.64.vpk
+```
+
+To increment the build number and create a new version:
+
+```sh
+./scripts/build.sh
+```
+
+The Vita application version is displayed as `00.NN`, while the project uses `0.0.NN`. Build outputs, APKs, VPKs, runtime logs, and crash dumps are ignored by Git.
+
+When changing the import table, regenerate it with:
+
+```sh
 python3 scripts/gen_dynlib.py
 ```
 
-## Licença
+## Development and validation
 
-Código do loader: MIT. O APK e seus assets pertencem aos seus donos e não são distribuídos aqui.
+Host tests compile selected production code with a C compiler and AddressSanitizer/UndefinedBehaviorSanitizer. Examples:
+
+```sh
+python3 tests/test_http_send.py
+python3 tests/test_cache_timing.py
+python3 tests/test_metadata_timing.py
+python3 tests/test_pthread_lifetime.py
+python3 tests/test_ui_geometry_wrapper.py
+```
+
+Tests that compare against game assets expect the supported APK at `../srr224.apk`. Some tests and generators also need **.NET 10**, **Pillow**, or **UnityPy**. For example, the managed regression test executes the original and patched UI array-copy method from the APK:
+
+```sh
+python3 tests/test_ui_trim_managed.py
+```
+
+Host tests validate behavior and data integrity. Frame rate, visuals, sound, and long-session stability must also be checked on real hardware.
+
+### Performance logs
+
+The application writes `ux0:data/srr/srr_log.txt`. To generate a report from a copied log:
+
+```sh
+python3 scripts/report_observation.py /path/to/srr_log.txt --out-dir build/report
+```
+
+The report includes observed scenes, frame windows, asset operations, and capture-health counters. Loading states can include user interaction, and nested timings must not be added as if they were independent waits.
+
+Version-by-version investigations are available in [docs/](docs/). These historical diagnostics are primarily in Portuguese. See [the 0.0.64 investigation](docs/diagnostico-0.0.64.md) for the current startup and networking findings.
+
+## Architecture
+
+| Component | Implementation |
+|---|---|
+| APK / ELF loading | `src/util/apk.c`, `src/loader/so_util.c` |
+| Unity player lifecycle | `src/unity_boot.c` |
+| EGL / GLES2 | `src/bridges/gl_bridge.c`, backed by vitaGL |
+| Input | `src/bridges/input_bridge.c` |
+| OpenSL ES / Java audio | `src/bridges/audio_bridge.c` |
+| Bionic threads and synchronization | `src/bridges/pthread_bridge.c` |
+| Cooperative signals and CPU exceptions | `src/bridges/signal_bridge.c` |
+| JIT memory | `src/bridges/mem_bridge.c`, backed by kubridge |
+| Android paths and libc | `src/bridges/fs_bridge.c`, `src/bridges/libc_bridge.c` |
+| JNI / Java compatibility | `src/jni/` |
+| HTTP/HTTPS | `src/net/http.c`, using sceNet and mbedTLS |
+| Managed-code diagnostics and guarded patches | `src/mono_probe.c`, `src/util/` |
+
+The supported game uses **Unity 4.7.2f1 with Mono**. The port provides a GLES2 renderer path, cooperative cross-thread signal handling for Mono's garbage collector, and HTTPS certificate verification using embedded CA roots. CPU affinity probes whether the system core is available and falls back to the normal user cores when necessary.
+
+Recent changes include bounded native copies for UI geometry, runtime array copies for UI buffer trimming, conservative UI mip-read skipping, JIT preparation, corrected thread-record lifetimes, and improved HTTP request transport. Some changes remain experimental and are documented with their validation limits.
+
+## LiveArea and splash artwork
+
+The circular icon and layered startup logo are derived from the supported APK. The supplied fan artwork is used for the LiveArea background and both splash paths, with proportional fitting. Generated resources and provenance are stored in `assets/` and `sce_sys/`.
+
+To regenerate these resources, install Pillow and UnityPy and run:
+
+```sh
+python3 scripts/make_livearea.py ../srr224.apk
+```
+
+The in-game splash is applied through a guarded read-time overlay; the APK on storage remains unchanged.
+
+## License and credits
+
+The loader code is provided under the project's MIT licensing terms. Vendored mbedTLS has its own [license](third_party/mbedtls/LICENSE). External libraries retain their respective licenses.
+
+Game code, trademarks, and artwork belong to their respective owners. The loader's code license does not grant rights to those materials. This repository contains packaged presentation artwork, but does not distribute the game APK or the complete game data.
+
+Thanks to the Sonic Runners Revival fan development team, VitaSDK, vitaGL, kubridge, and the PS Vita homebrew community.

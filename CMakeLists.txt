@@ -56,6 +56,10 @@ add_executable(${PROJECT_NAME}
   src/util/observe.c
   src/util/native_heap.c
   src/util/work_trace.c
+  src/util/managed_trace.c
+  src/util/ui_geometry.c
+  src/util/title_layout.c
+  src/util/splash_art.c
   src/util/gc_trace.c
   src/util/gc_policy.c
   src/util/bundle_mips.c
@@ -145,11 +149,19 @@ add_custom_command(
           -s ${CMAKE_BINARY_DIR}/param.sfo
           -b ${CMAKE_BINARY_DIR}/eboot.bin
           -a ${SCE_SYS}/icon0.png=sce_sys/icon0.png
+          -a ${SCE_SYS}/pic0.png=sce_sys/pic0.png
+          -a ${CMAKE_SOURCE_DIR}/assets/game-splash.rgb=assets/game-splash.rgb
           -a ${SCE_SYS}/livearea/contents/bg.png=sce_sys/livearea/contents/bg.png
           -a ${SCE_SYS}/livearea/contents/startup.png=sce_sys/livearea/contents/startup.png
           -a ${SCE_SYS}/livearea/contents/template.xml=sce_sys/livearea/contents/template.xml
           ${CMAKE_BINARY_DIR}/${VPK_NAME}
   DEPENDS eboot.bin ${CMAKE_BINARY_DIR}/param.sfo
+          ${SCE_SYS}/icon0.png
+          ${SCE_SYS}/pic0.png
+          ${CMAKE_SOURCE_DIR}/assets/game-splash.rgb
+          ${SCE_SYS}/livearea/contents/bg.png
+          ${SCE_SYS}/livearea/contents/startup.png
+          ${SCE_SYS}/livearea/contents/template.xml
   VERBATIM)
 add_custom_target(vpk ALL DEPENDS ${CMAKE_BINARY_DIR}/${VPK_NAME})
 add_dependencies(vpk eboot.bin-self)

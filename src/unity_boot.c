@@ -29,6 +29,7 @@ void mono_menu_fix(void);
 void mono_texture_budget_tick(void);
 void mono_gc_policy_tick(void);
 void mono_observe_tick(void);
+void mono_input_tick(void);
 void audio_fmod_stop(void);
 
 static void *env;
@@ -169,6 +170,7 @@ int unity_run(void) {
     observe_begin_frame(frame + 1);
     work_trace_frame_begin();
     uint64_t frame_start = sceKernelGetProcessTimeWide();
+    mono_input_tick();
     // While the system keyboard is up it owns the touchscreen and buttons.
     if (!ime_running())
       input_poll();
