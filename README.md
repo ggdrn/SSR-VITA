@@ -6,11 +6,11 @@ Play **Sonic Runners Revival** on your PlayStation Vita, with touchscreen and ph
 
 1. Install **kubridge.skprx** and enable it under `*KERNEL` in your taiHEN configuration.
 2. Install **libshacccg.suprx**, for example using ShaRKBR33D.
-3. Install the port's **VPK** using VitaShell.
-4. Copy your Sonic Runners Revival APK to **`ux0:data/srr/srr224.apk`**.
+3. Download the [VPK from GitHub Releases](https://github.com/ggdrn/SSR-VITA/releases) and install it using VitaShell.
+4. Download the [Sonic Runners Revival APK](https://sonicrunners.com/#/download) and copy it to **`ux0:data/srr/srr224.apk`**.
 5. Launch the game. For online features, connect to Wi-Fi and check the Vita's date and time.
 
-The game APK is not included. No OBB extraction is required.
+The game APK is not included. No OBB extraction is required. Required data downloads automatically and is saved locally. If a download fails, close the game and reopen it to retry.
 
 ## Controls
 

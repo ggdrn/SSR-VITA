@@ -46,7 +46,18 @@ Prepare vitaGL with the compatible changes in [patches/](../patches/), including
 make -C ../vitaGL HAVE_SHARK_LOG=1 HAVE_SHADER_CACHE=1
 ```
 
-Then build the port from the repository root:
+To build the public release from the repository root:
+
+```sh
+./scripts/build.sh --release
+```
+
+Release versions are configured in `cmake/ReleaseVersion.cmake`. Release `0.1` produces
+`build/VPK/SRR-Vita-v0.01.00.vpk`, with Vita `APP_VER=00.10`. The internal development
+counter in `VERSION` is preserved. Plain CMake builds can select this mode with
+`-DSRR_RELEASE_BUILD=ON`.
+
+To rebuild the current development package instead:
 
 ```sh
 ./scripts/build.sh --rebuild

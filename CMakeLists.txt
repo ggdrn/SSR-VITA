@@ -23,6 +23,12 @@ else()
 endif()
 set(SRR_VERSION "0.0.${SRR_BUILD_2}")
 set(SRR_SFO_VERSION "00.${SRR_BUILD_2}")
+option(SRR_RELEASE_BUILD "Build the public release package" OFF)
+if(SRR_RELEASE_BUILD)
+  include("${CMAKE_SOURCE_DIR}/cmake/ReleaseVersion.cmake")
+  set(SRR_VERSION "${SRR_RELEASE_VERSION}")
+  set(SRR_SFO_VERSION "${SRR_RELEASE_APP_VERSION}")
+endif()
 string(TIMESTAMP SRR_BUILD_STAMP "%Y%m%dT%H%M%SZ" UTC)
 configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 
@@ -136,12 +142,14 @@ vita_create_self(eboot.bin ${PROJECT_NAME} UNSAFE)
 # Packaging is done by hand instead of vita_create_vpk(): that helper doesn't
 # quote FILE paths, and this repo lives under a folder with spaces.
 set(VPK_NAME "SRR-Vita-v${SRR_VERSION}.vpk")
+file(WRITE "${CMAKE_BINARY_DIR}/package-name.txt" "${VPK_NAME}\n")
 set(SCE_SYS "${CMAKE_SOURCE_DIR}/sce_sys")
 add_custom_command(
   OUTPUT ${CMAKE_BINARY_DIR}/param.sfo
   COMMAND $ENV{VITASDK}/bin/vita-mksfoex -d ATTRIBUTE2=12 -s APP_VER=${SRR_SFO_VERSION}
           -s TITLE_ID=${VITA_TITLEID} ${VITA_APP_NAME} ${CMAKE_BINARY_DIR}/param.sfo
-  DEPENDS ${CMAKE_SOURCE_DIR}/VERSION
+  DEPENDS ${CMAKE_SOURCE_DIR}/VERSION ${CMAKE_SOURCE_DIR}/cmake/ReleaseVersion.cmake
+          ${CMAKE_BINARY_DIR}/generated/version.h
   VERBATIM)
 add_custom_command(
   OUTPUT ${CMAKE_BINARY_DIR}/${VPK_NAME}
