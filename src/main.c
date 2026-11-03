@@ -11,6 +11,7 @@
 #include "util/apk.h"
 #include "util/log.h"
 #include "net/http.h"
+#include "port_menu.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -151,6 +152,7 @@ int main(void) {
     fatal_error("Could not read %s.\nIs the APK complete?", apk);
 
   observe_mark("apk.index.ready");
+  port_settings_load();
   fs_init(apk);
   proc_init();
   libc_bridge_init();
@@ -174,6 +176,7 @@ int main(void) {
   log_free_memory("after libraries");
   observe_mark("graphics.begin");
   gl_bridge_init();
+  port_menu_init();
   observe_mark("graphics.ready");
   log_free_memory("after vitaGL");
 

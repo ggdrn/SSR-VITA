@@ -10,3 +10,18 @@ srr_log.txt
 
 tests/ui_trim/bin/
 tests/ui_trim/obj/
+
+tests/buddy_il/bin/
+
+tests/buddy_il/obj/
+
+tests/ui_sort/bin/
+tests/ui_sort/obj/
+
+tests/rijndael256/bin/
+tests/rijndael256/obj/
+
+tests/stage_parse/bin/
+tests/stage_parse/obj/
+tests/stage_parse/unity/bin/
+tests/stage_parse/unity/obj/

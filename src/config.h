@@ -16,8 +16,13 @@
 #define ANDROID_DATA_DIR "/data/data/" PACKAGE_NAME
 #define ANDROID_SDCARD   "/sdcard"
 
-#define SCREEN_W 960
-#define SCREEN_H 544
+// Display buffers are created at the full size; the port menu can render at a
+// smaller size (SD/HD) that the Vita's display scaler stretches to the screen.
+#define SCREEN_MAX_W 960
+#define SCREEN_MAX_H 544
+extern int port_screen_w, port_screen_h;
+#define SCREEN_W port_screen_w
+#define SCREEN_H port_screen_h
 
 // Native libraries loaded from lib/armeabi-v7a/ inside the APK, in load order.
 #define LIB_DIR "lib/armeabi-v7a/"

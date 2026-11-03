@@ -6,6 +6,7 @@
 #include "bridges.h"
 #include "../config.h"
 #include "../util/log.h"
+#include "../port_menu.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -816,13 +817,17 @@ void glDeleteProgram_bridge(GLuint prog) {
 }
 
 void gl_bridge_init(void) {
-  FILE *marker = fopen(DATA_PATH "/original_character_shader", "rb");
-  if (marker) { character_compat = 0; fclose(marker); }
+  // Port menu setting (the old original_character_shader marker file sets its default).
+  character_compat = !port_character_shader_original();
   L_INFO("gl: character shader mode %s", character_compat ? "diffuse compatibility (envmap rollback)" : "original");
   // Keep standard optimization rather than unsafe algebra on legacy Unity
   // shaders; lighting normalizes vectors that can be zero during transitions.
   vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, SHARK_DISABLE, SHARK_ENABLE, SHARK_ENABLE);
   vglSetShaderCachePath(DATA_PATH "/shader_cache_v35");
-  vglInitExtended(0, SCREEN_W, SCREEN_H, VGL_RAM_THRESHOLD, SCE_GXM_MULTISAMPLE_NONE);
-  L_INFO("gl: vitaGL ready (%dx%d)", SCREEN_W, SCREEN_H);
+  vglInitExtended(0, SCREEN_MAX_W, SCREEN_MAX_H, VGL_RAM_THRESHOLD, SCE_GXM_MULTISAMPLE_NONE);
+  L_INFO("gl: vitaGL ready (%dx%d)", SCREEN_MAX_W, SCREEN_MAX_H);
 }
+
+// Unity's own eglSwapInterval calls stay ignored; the port menu picks 1 (60 Hz)
+// or 2 (30 fps with even pacing).
+void gl_set_swap_interval(int interval) { eglSwapInterval(NULL, interval); }

@@ -384,6 +384,17 @@ void input_poll(void) {
   }
 }
 
+// The port menu takes the controls: lift every finger and key the game still
+// sees as held, and forget the pad state so nothing replays on return.
+void input_release_all(void) {
+  for (int slot = 0; slot < MAX_POINTERS; slot++)
+    if (slots[slot].active) pointer_up(slot);
+  for (size_t i = 0; i < sizeof(key_map) / sizeof(key_map[0]); i++)
+    if (prev_buttons & key_map[i].vita) push_key(key_map[i].android, 0);
+  if (prev_buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_START | SCE_CTRL_SELECT)) push_key(AKEYCODE_BACK, 0);
+  prev_buttons = 0;
+}
+
 void input_init(void) {
   for (int i = 0; i < MAX_POINTERS; i++) slots[i].hardware_id = -1;
   sceKernelCreateLwMutex(&q_lock, "input", 0, 0, NULL);

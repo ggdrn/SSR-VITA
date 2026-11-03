@@ -1,5 +1,6 @@
 #include "util/observe.h"
 #include "util/work_trace.h"
+#include "util/managed_trace.h"
 // Replays what the Java side of a Unity 4.x Android player does:
 //   System.loadLibrary("main")        -> libmain JNI_OnLoad
 //   NativeLoader.load(libDir)         -> libmain loads libmono/libunity
@@ -13,6 +14,7 @@
 #include "jni/jni.h"
 #include "loader/so_util.h"
 #include "util/log.h"
+#include "port_menu.h"
 
 #include <string.h>
 #include <psp2/kernel/threadmgr.h>
@@ -169,10 +171,12 @@ int unity_run(void) {
   for (;;) {
     observe_begin_frame(frame + 1);
     work_trace_frame_begin();
+    managed_trace_frame_begin(frame + 1);
     uint64_t frame_start = sceKernelGetProcessTimeWide();
     mono_input_tick();
-    // While the system keyboard is up it owns the touchscreen and buttons.
-    if (!ime_running())
+    // The port menu (L + R + START) and the system keyboard own the controls
+    // while they are open.
+    if (!port_menu_tick() && !ime_running())
       input_poll();
     const char *typed = ime_poll();
     if (typed) {
@@ -188,6 +192,7 @@ int unity_run(void) {
     if (frame < 300 && frame % 30 == 1) mono_menu_fix();
     if (frame % 30 == 1) {
       mono_texture_budget_tick();
+      mono_port_quality_apply();
       mono_gc_policy_tick();
     }
     uint64_t render_start = sceKernelGetProcessTimeWide();
@@ -196,6 +201,7 @@ int unity_run(void) {
       break;
     }
     uint64_t render_us = sceKernelGetProcessTimeWide() - render_start;
+    managed_trace_frame_end(render_us);
     static uint64_t total_us, worst_us;
     static unsigned slow_frames;
     total_us += render_us;

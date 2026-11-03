@@ -16,10 +16,16 @@
 #include "ui_mesh.h"
 #include "util/ui_geometry.h"
 #include "util/managed_trace.h"
+#include "util/buddy_ui.h"
 #include "util/native_heap.h"
 #include "util/race_warmup.h"
 #include "util/terrain_gc.h"
 #include "util/ui_trim.h"
+#include "util/ui_sort.h"
+#include "util/rijndael256.h"
+#include "util/stage_parse.h"
+#include "config.h"
+#include "port_menu.h"
 #include <malloc.h>
 #include <stdio.h>
 #include <psp2/kernel/processmgr.h>
@@ -597,6 +603,33 @@ static void patch_ui_trim_il(void) {
   if (header) free_header(header);
 }
 
+// Preserve stable ordering without repeatedly scanning the entire list after
+// a late icon changes its material/depth. Patch IL before the first UI JIT.
+static void patch_ui_sort_il(void) {
+  FILE *marker = fopen(DATA_PATH "/original_ui_sort", "rb");
+  if (marker) { fclose(marker); L_INFO("ui: original BetterList sort requested"); return; }
+  so_module *mono = so_find_module("libmono.so");
+  const char *(*guid)(MonoImage *) = (void *)so_symbol(mono, "mono_image_get_guid");
+  MonoMethod *(*get_method)(MonoImage *, uint32_t, MonoClass *) = (void *)so_symbol(mono, "mono_get_method");
+  void *(*get_header)(MonoMethod *) = (void *)so_symbol(mono, "mono_method_get_header");
+  const uint8_t *(*get_code)(void *, uint32_t *, uint32_t *) = (void *)so_symbol(mono, "mono_method_header_get_code");
+  void (*free_header)(void *) = (void *)so_symbol(mono, "mono_metadata_free_mh");
+  const char *id = guid ? guid(game_image) : NULL;
+  if (!id || strcasecmp(id, RACE_WARMUP_MVID) || !get_method || !get_header || !get_code || !free_header) {
+    L_WARN("ui: Sort assembly/API differs; original sort preserved"); return;
+  }
+  MonoMethod *method = get_method(game_image, 0x060001f6, NULL);
+  void *header = method ? get_header(method) : NULL;
+  uint32_t size = 0, stack = 0;
+  const uint8_t *code = header ? get_code(header, &size, &stack) : NULL;
+  if (code && stack >= 11 && size == sizeof(ui_sort_original) && !memcmp(code, ui_sort_original, size)) {
+    kuKernelCpuUnrestrictedMemcpy((void *)code, ui_sort_adjacent, sizeof(ui_sort_adjacent));
+    kuKernelFlushCaches((void *)code, sizeof(ui_sort_adjacent));
+    L_INFO("ui: BetterList stable adjacent sort installed (no full-list bubble passes; future JIT)");
+  } else L_WARN("ui: Sort IL/stack differs; original sort preserved");
+  if (header) free_header(header);
+}
+
 // ReCreateTerrain starts this coroutine again during a run. Its final
 // instruction forces a full collection even with ample free memory. Keep
 // all terrain creation/return-to-pool and completion state; automatic GC
@@ -744,9 +777,9 @@ static void observe_mono_label(MonoObject *value, char *out, unsigned cap) {
   if (utf8) api.mono_free(utf8);
 }
 
-// The game's LightMode also requests 30 fps. Keep its visual settings but
-// request the display's 60 Hz budget during the race, including after resets.
-// Resolve native icalls so the regular poll does not allocate managed objects.
+// The game requests 60 fps in menus and 30 fps in races with its LightMode.
+// Apply the port menu's frame rate (default 60) in every scene, including
+// after the game's own resets. Native icalls keep the poll allocation-free.
 static void race_frame_rate_tick(void) {
   static int (*get_rate)(void);
   static void (*set_rate)(int);
@@ -759,14 +792,15 @@ static void race_frame_rate_tick(void) {
     void *a = lookup && get ? lookup(get) : NULL, *b = lookup && set ? lookup(set) : NULL;
     if (!a || !b || so_module_at((uintptr_t)a) != unity || so_module_at((uintptr_t)b) != unity) return;
     get_rate = a; set_rate = b;
-    L_INFO("perf: race 60 fps target ready (quality settings preserved)");
+    L_INFO("perf: frame rate target ready (quality settings preserved)");
   }
+  int target = port_target_fps();
   int before = get_rate();
-  if (before == 60) return;
-  set_rate(60);
+  if (before == target) return;
+  set_rate(target);
   static unsigned changes;
   if (++changes <= 8 || (changes & (changes - 1)) == 0)
-    L_INFO("perf: race targetFrameRate %d -> %d (request, not measured fps)", before, get_rate());
+    L_INFO("perf: targetFrameRate %d -> %d (request, not measured fps)", before, get_rate());
 }
 // Native integer/boolean getters avoid managed allocations in the poll. The
 // scene name is fetched only after its integer index changes.
@@ -825,8 +859,9 @@ void mono_observe_tick(void) {
   }
   input_race_scene = !loading && !strcmp(name, "s_playingstage");
   mono_input_tick();
+  managed_trace_menu_mode(!loading && !strcmp(name, "MainMenu"));
   managed_trace_focus(!loading && !strcmp(name, "s_playingstage") ? ui_panel_late_method : NULL);
-  if (!loading && !strcmp(name, "s_playingstage")) race_frame_rate_tick();
+  if (!loading) race_frame_rate_tick();
   observe_phase(name, loading);
 }
 
@@ -1046,12 +1081,16 @@ void mono_menu_fix(void) {
   patch_perf_il();
   patch_spawn_il();
   patch_hot_loop_il();
+  stage_parse_install(game_image);
   cache_timing_init();
   patch_ui_trim_il();
+  patch_ui_sort_il();
+  rijndael256_install();
   ui_geometry_install(game_image);
+  buddy_ui_install(game_image);
   MonoClass *panel = api.class_from_name(game_image, "", "UIPanel");
   ui_panel_late_method = panel ? api.get_method(panel, "LateUpdate", 0) : NULL;
-  if (ui_panel_late_method) L_INFO("perf: gameplay callback timing focuses on UIPanel; other callbacks forward without clocks");
+  if (ui_panel_late_method) L_INFO("perf: gameplay timing focuses on UIPanel; full sample every 32 frames and 120 frames after a >100ms render");
   L_INFO("mem: original menu image loaders restored (0.0.42 image patch disabled)");
   klass = api.class_from_name(game_image, "", "SoundManager");
   method = klass ? api.get_method(klass, "OutputPlayLog", 1) : NULL;
@@ -1293,7 +1332,9 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
     L_INFO("gc: explicit requests in window %u available %d", manual_total, manual_available);
     L_INFO("perf: asset call coverage instantiate %u resources-load %u www-texture %u unload-unused %u", clone_calls, resource_calls, image_calls, unload_calls);
     L_INFO("perf: managed callback coverage %u outer calls", managed_calls);
+    L_INFO("ui: buddy idle skips %u active forwards %u", managed_trace_idle_skipped(), managed_trace_idle_forwarded());
     L_INFO("ui: geometry bulk appends %u original fallbacks %u", ui_geometry_fast_calls(), ui_geometry_fallback_calls());
+    L_INFO("stage: Rijndael256 native blocks %u original fallbacks %u", rijndael256_fast_calls(), rijndael256_fallback_calls());
     managed_calls = 0;
     clone_calls = resource_calls = image_calls = unload_calls = 0;
     manual_total = 0;
@@ -1469,6 +1510,66 @@ void mono_probe(void) {
            boxed_f(pos, 2));
   }
 }
+// --- Port settings menu (src/port_menu.c) -----------------------------------
+// Runs on the Unity thread between frames.
+
+void mono_port_frame_rate_apply(void) {
+  if (unity_image) race_frame_rate_tick();
+}
+
+// Keeps Unity on the quality level and texture size chosen in the port menu.
+// The game selects level 0 (Light Mode) or 1 (Normal) at the title screen;
+// that choice is replaced here, through the same native SetQualityLevel path
+// the texture budget guard uses.
+void mono_port_quality_apply(void) {
+  static int (*quality_get)(void);
+  if (!texture_budget_ready) texture_budget_init();
+  if (texture_budget_ready != 1) return;
+  if (!quality_get) {
+    so_module *mono = so_find_module("libmono.so"), *unity = so_find_module("libunity.so");
+    void *(*lookup)(MonoMethod *) = (void *)so_symbol(mono, "mono_lookup_internal_call");
+    MonoClass *klass = api.class_from_name(unity_image, "UnityEngine", "QualitySettings");
+    MonoMethod *get = klass ? api.get_method(klass, "GetQualityLevel", 0) : NULL;
+    void *fn = lookup && get ? lookup(get) : NULL;
+    if (!fn || so_module_at((uintptr_t)fn) != unity) return;
+    quality_get = fn;
+  }
+  int level = port_unity_quality_level(), current = quality_get();
+  if (current != level) {
+    quality_level_with_texture_budget(level, 1);
+    L_INFO("port: Unity quality level %d -> %d", current, quality_get());
+  }
+  int limit = port_texture_limit(), before = texture_limit_native_get();
+  if (before != limit) {
+    texture_limit_native_set(limit);
+    bundle_mips_set_limit(texture_limit_native_get());
+    L_INFO("port: masterTextureLimit %d -> %d", before, texture_limit_native_get());
+  }
+}
+
+static MonoObject *port_save_manager(void) {
+  if (!game_image) return NULL;
+  return call_in(game_image, "SaveData", "SystemSaveManager", "get_Instance", NULL, NULL, 0);
+}
+
+int mono_port_light_mode(void) {
+  MonoObject *data = instance_call(port_save_manager(), "GetSystemdata", NULL, 0);
+  return data ? instance_bool(data, "get_lightMode") : -1;
+}
+
+// Same steps as the game's own performance window: set the flag and save.
+int mono_port_set_light_mode(int on) {
+  MonoObject *manager = port_save_manager();
+  MonoObject *data = instance_call(manager, "GetSystemdata", NULL, 0);
+  if (!data) return 0;
+  uint8_t value = on ? 1 : 0;
+  void *args[] = {&value};
+  instance_call(data, "set_lightMode", args, 1);
+  instance_call(manager, "SaveSystemData", NULL, 0);
+  L_INFO("port: game Light Mode -> %d (saved)", mono_port_light_mode());
+  return 1;
+}
+
 
 // Only query the scene name every 300 frames. Full object enumeration occurs
 // on transitions and infrequent snapshots, never in the render timing window.

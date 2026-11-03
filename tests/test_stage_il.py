@@ -3,7 +3,7 @@
 from pathlib import Path
 import subprocess,tempfile
 src=(Path(__file__).resolve().parents[1]/'src/mono_probe.c').read_text()
-a=src.index('static void patch_stage_il(void) {');b=src.index('// Called between frames',a)
+a=src.index('static void patch_stage_il(void) {');b=src.index('// BetterList<T>.Trim',a)
 harness=r'''
 #include <stdint.h>
 #include <string.h>
@@ -19,7 +19,8 @@ static const uint8_t original_light[]={0x28,0xee,0x28,0,6,0x39,2,0,0,0,0x16,0x2a
 static MonoClass *klass(int image,const char *ns,const char *name){return (void *)name;}
 static MonoMethod *method(MonoClass *cls,const char *name,int nargs){
  if(strcmp(name,"ActivateBlock")==0){assert(nargs==-1);return (void *)1;}
- assert(strcmp(name,"LightPlaySE")==0 && nargs==2);return (void *)2;
+ if(strcmp(name,"LightPlaySE")!=0)return NULL;
+ assert(nargs==2);return (void *)2;
 }
 static struct{MonoClass *(*class_from_name)(int,const char *,const char *);
  MonoMethod *(*get_method)(MonoClass *,const char *,int);} api={klass,method};

@@ -55,6 +55,7 @@ add_executable(${PROJECT_NAME}
   src/main.c
   src/unity_boot.c
   src/patches.c
+  src/port_menu.c
   src/ui_mesh.c
   src/mono_probe.c
   src/net/http.c
@@ -62,6 +63,9 @@ add_executable(${PROJECT_NAME}
   src/util/observe.c
   src/util/native_heap.c
   src/util/work_trace.c
+  src/util/buddy_ui.c
+  src/util/rijndael256.c
+  src/util/stage_parse.c
   src/util/managed_trace.c
   src/util/ui_geometry.c
   src/util/title_layout.c
