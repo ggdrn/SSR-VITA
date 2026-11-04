@@ -120,7 +120,7 @@ static void load_libraries(void) {
   }
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
   log_init();
   observe_init();
   L_INFO("SRR Vita " SRR_VERSION_STRING " (build %s)", SRR_BUILD_STAMP);
@@ -142,7 +142,7 @@ int main(void) {
   sceAppUtilInit(&init_param, &boot_param);
 
   port_settings_load();
-  if (port_settings_requested() && !port_settings_screen()) {
+  if (port_settings_requested(argc, argv) && !port_settings_screen()) {
     log_finish();
     sceKernelExitProcess(0);
     return 0;

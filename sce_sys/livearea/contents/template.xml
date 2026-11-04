@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 
-<livearea style="a1" format-ver="01.00" content-rev="6">
+<livearea style="a1" format-ver="01.00" content-rev="7">
   <livearea-background>
     <image>bg.png</image>
   </livearea-background>
@@ -12,7 +12,7 @@
   <frame id="frame3">
     <liveitem>
       <image>settings.png</image>
-      <target auto="off">psgm:play?titleid=SRRV00001&amp;param=settings</target>
+      <target auto="off">psla:settings</target>
     </liveitem>
   </frame>
 </livearea>

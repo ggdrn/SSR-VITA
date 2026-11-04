@@ -1,6 +1,5 @@
 // Port settings screen, opened from the "Settings" button in the LiveArea
-// (psgm:play?titleid=SRRV00001&param=settings) or by holding SELECT while the
-// game starts. It runs before Unity is loaded, drawing with the CPU into its
+// (target psla:settings) or by holding SELECT while the game starts. It runs before Unity is loaded, drawing with the CPU into its
 // own display buffer, and ends with "Start Game" or "Exit" (back to the
 // LiveArea). Settings are only applied at boot: changing them while Unity is
 // running caused visible glitches.
@@ -16,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <psp2/appmgr.h>
+#include <psp2/apputil.h>
 #include <psp2/ctrl.h>
 #include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
@@ -236,13 +236,34 @@ static void draw_screen(uint32_t *fb, int selected) {
   draw_text(fb, FB_W, 40, FB_H - 36, 16, "UP/DOWN select   LEFT/RIGHT change   X confirm   O exit", RGB(150, 150, 150));
 }
 
-// LiveArea links arrive as "psgm:play?titleid=...&param=settings".
-int port_settings_requested(void) {
-  char param[1024];
-  memset(param, 0, sizeof(param));
-  if (sceAppMgrGetAppParam(param) >= 0 && strstr(param, "param=settings")) {
+// A LiveArea "psla:<arg>" target launches (or resumes) this app and hands it
+// <arg> as an AppUtil event.
+static int livearea_settings_event(void) {
+  SceAppUtilAppEventParam event;
+  memset(&event, 0, sizeof(event));
+  if (sceAppUtilReceiveAppEvent(&event) < 0) return 0;
+  char arg[1024];
+  memset(arg, 0, sizeof(arg));
+  if (sceAppUtilAppEventParseLiveArea(&event, arg) < 0) return 0;
+  L_INFO("port: LiveArea event 0x%X \"%s\"", event.type, arg);
+  return strstr(arg, "settings") != NULL;
+}
+
+int port_settings_requested(int argc, char *argv[]) {
+  for (int i = 0; i < argc; i++)
+    if (argv[i] && !strcmp(argv[i], "settings")) {
+      L_INFO("port: settings requested on restart");
+      return 1;
+    }
+  if (livearea_settings_event()) {
     L_INFO("port: settings requested from the LiveArea");
     return 1;
+  }
+  char param[1024];
+  memset(param, 0, sizeof(param));
+  if (sceAppMgrGetAppParam(param) >= 0 && param[0]) {
+    L_INFO("port: app param \"%s\"", param);
+    if (strstr(param, "settings")) return 1;
   }
   SceCtrlData pad;
   memset(&pad, 0, sizeof(pad));
@@ -251,6 +272,19 @@ int port_settings_requested(void) {
     return 1;
   }
   return 0;
+}
+
+// The Settings button was tapped while the game was running (the system just
+// resumes it): restart into the settings screen, since settings only apply at
+// boot.
+void port_settings_poll(void) {
+  if (!livearea_settings_event()) return;
+  L_INFO("port: restarting into the settings screen");
+  log_finish();
+  static char arg[] = "settings";
+  char *const argv[] = {arg, NULL};
+  int r = sceAppMgrLoadExec("app0:eboot.bin", argv, NULL);
+  L_WARN("port: restart failed (0x%08X)", r);
 }
 
 int port_settings_screen(void) {

@@ -12,7 +12,8 @@ enum { PORT_QUALITY_LOW, PORT_QUALITY_MEDIUM, PORT_QUALITY_HIGH, PORT_QUALITY_CO
 extern int port_screen_w, port_screen_h;
 
 void port_settings_load(void);       // first thing at boot
-int port_settings_requested(void);   // LiveArea link or SELECT held
+int port_settings_requested(int argc, char *argv[]);  // LiveArea link, restart arg or SELECT held
+void port_settings_poll(void);       // in game: LiveArea Settings tapped -> restart into it
 int port_settings_screen(void);      // 1: start the game, 0: exit
 void port_menu_init(void);           // after gl_bridge_init()
 

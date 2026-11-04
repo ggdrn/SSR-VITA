@@ -192,6 +192,7 @@ int unity_run(void) {
     if (frame % 30 == 1) {
       mono_texture_budget_tick();
       mono_port_quality_apply();
+      port_settings_poll();
       mono_gc_policy_tick();
     }
     uint64_t render_start = sceKernelGetProcessTimeWide();
