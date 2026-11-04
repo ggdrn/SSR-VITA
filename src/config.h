@@ -16,8 +16,8 @@
 #define ANDROID_DATA_DIR "/data/data/" PACKAGE_NAME
 #define ANDROID_SDCARD   "/sdcard"
 
-// Display buffers are created at the full size; the port menu can render at a
-// smaller size (SD/HD) that the Vita's display scaler stretches to the screen.
+// Full Vita screen; the port settings can render smaller (SD/HD), which the
+// display scaler stretches to the screen.
 #define SCREEN_MAX_W 960
 #define SCREEN_MAX_H 544
 extern int port_screen_w, port_screen_h;

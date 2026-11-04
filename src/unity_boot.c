@@ -174,9 +174,8 @@ int unity_run(void) {
     managed_trace_frame_begin(frame + 1);
     uint64_t frame_start = sceKernelGetProcessTimeWide();
     mono_input_tick();
-    // The port menu (L + R + START) and the system keyboard own the controls
-    // while they are open.
-    if (!port_menu_tick() && !ime_running())
+    // While the system keyboard is up it owns the touchscreen and buttons.
+    if (!ime_running())
       input_poll();
     const char *typed = ime_poll();
     if (typed) {

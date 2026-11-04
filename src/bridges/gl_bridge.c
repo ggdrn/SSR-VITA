@@ -824,10 +824,12 @@ void gl_bridge_init(void) {
   // shaders; lighting normalizes vectors that can be zero during transitions.
   vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, SHARK_DISABLE, SHARK_ENABLE, SHARK_ENABLE);
   vglSetShaderCachePath(DATA_PATH "/shader_cache_v35");
-  vglInitExtended(0, SCREEN_MAX_W, SCREEN_MAX_H, VGL_RAM_THRESHOLD, SCE_GXM_MULTISAMPLE_NONE);
-  L_INFO("gl: vitaGL ready (%dx%d)", SCREEN_MAX_W, SCREEN_MAX_H);
+  // Render size from the port settings; the Vita's display scaler stretches
+  // SD/HD to the screen.
+  vglInitExtended(0, SCREEN_W, SCREEN_H, VGL_RAM_THRESHOLD, SCE_GXM_MULTISAMPLE_NONE);
+  L_INFO("gl: vitaGL ready (%dx%d)", SCREEN_W, SCREEN_H);
 }
 
-// Unity's own eglSwapInterval calls stay ignored; the port menu picks 1 (60 Hz)
-// or 2 (30 fps with even pacing).
+// Unity's own eglSwapInterval calls stay ignored; the port settings pick 1
+// (60 Hz) or 2 (30 fps with even pacing).
 void gl_set_swap_interval(int interval) { eglSwapInterval(NULL, interval); }

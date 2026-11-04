@@ -1,30 +1,29 @@
-// Port settings menu, opened with L + R + START.
-//
-// The menu is drawn by the CPU straight into each display buffer from
-// vitaGL's display callback, after the GPU has finished the frame. Unity's GL
-// state is never touched, so its state cache stays valid. While the menu is
-// open the game keeps running but receives no input (in a race, the L/START
-// part of the combo has already sent BACK, which pauses the game).
+// Port settings screen, opened from the "Settings" button in the LiveArea
+// (psgm:play?titleid=SRRV00001&param=settings) or by holding SELECT while the
+// game starts. It runs before Unity is loaded, drawing with the CPU into its
+// own display buffer, and ends with "Start Game" or "Exit" (back to the
+// LiveArea). Settings are only applied at boot: changing them while Unity is
+// running caused visible glitches.
 //
 // Settings are stored in PORT_SETTINGS_PATH as key=value lines.
 
 #include "port_menu.h"
 #include "config.h"
-#include "bridges/bridges.h"
 #include "util/log.h"
 #include "util/port_font.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <psp2/appmgr.h>
 #include <psp2/ctrl.h>
+#include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
 #include <vitaGL.h>
 
 // vitaGL globals describing the buffer being handed to the display.
 extern int DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_STRIDE;
-extern volatile int unity_resize_requested;
-void input_release_all(void);
 void gl_set_swap_interval(int interval);
 
 #define PORT_SETTINGS_PATH DATA_PATH "/port_settings.txt"
@@ -96,158 +95,9 @@ static void settings_save(void) {
   fclose(f);
 }
 
-// --- Applying settings ------------------------------------------------------
-
-static volatile int overlay_skip;  // Display frames to leave untouched after a resize.
-static int resize_next_frame;
-static int character_original_at_boot;
-
-static void apply_resolution(void) {
-  int w = resolutions[cfg.resolution].w, h = resolutions[cfg.resolution].h;
-  if (w == port_screen_w && h == port_screen_h && DISPLAY_WIDTH == w) return;
-  if (!vglSwapResolution(w, h)) {
-    L_WARN("port: display refused %dx%d", w, h);
-    return;
-  }
-  // vitaGL switches buffers at the end of the next swap; Unity is told on the
-  // frame after that, so it never renders into a buffer of the other size.
-  overlay_skip = 4;
-  port_screen_w = w;
-  port_screen_h = h;
-  resize_next_frame = 1;
-  L_INFO("port: resolution -> %dx%d", w, h);
-}
-
-static void apply_fps(void) {
-  // A swap interval of 2 paces 30 fps on the 60 Hz display evenly.
-  gl_set_swap_interval(cfg.fps == 30 ? 2 : 1);
-  mono_port_frame_rate_apply();
-}
-
-// --- Menu model --------------------------------------------------------------
-
-enum { ROW_RESOLUTION, ROW_GRAPHICS, ROW_FPS, ROW_EFFECTS, ROW_FPS_COUNTER, ROW_CHARACTER, ROW_CLOSE, ROW_COUNT };
-
-static int menu_open, menu_closing, selected;
-static int light_mode = -1;  // Game's Light Mode, read when the menu opens.
-static uint32_t prev_buttons;
-static uint64_t repeat_at;
-
-static const char *const quality_names[] = {"Low", "Medium", "High"};
-
-static void row_value(int row, char *out, size_t size) {
-  switch (row) {
-  case ROW_RESOLUTION: snprintf(out, size, "%s", resolutions[cfg.resolution].name); break;
-  case ROW_GRAPHICS: snprintf(out, size, "%s", quality_names[cfg.quality]); break;
-  case ROW_FPS: snprintf(out, size, "%d FPS", cfg.fps); break;
-  case ROW_EFFECTS: {
-    snprintf(out, size, "%s", light_mode < 0 ? "Not loaded yet" : light_mode ? "Light" : "Full");
-    break;
-  }
-  case ROW_FPS_COUNTER: snprintf(out, size, "%s", cfg.fps_counter ? "On" : "Off"); break;
-  case ROW_CHARACTER: snprintf(out, size, "%s", cfg.character_original ? "Original" : "Compatible"); break;
-  default: out[0] = 0;
-  }
-}
-
-static const char *const row_names[ROW_COUNT] = {"Resolution", "Graphics", "Frame Rate", "Effects",
-                                                 "FPS Counter", "Character Shader", "Close"};
-
-static const char *row_hint(int row) {
-  switch (row) {
-  case ROW_RESOLUTION:
-    return cfg.resolution == PORT_RES_QHD ? "Native Vita resolution."
-                                          : "Rendered smaller, upscaled. Faster GPU.";
-  case ROW_GRAPHICS:
-    return cfg.quality == PORT_QUALITY_LOW ? "Game's Light quality. Quarter-size textures."
-           : cfg.quality == PORT_QUALITY_HIGH ? "Unity 'Simple' level: sharper filtering."
-                                              : "Game's Normal quality. Half-size textures.";
-  case ROW_FPS: return cfg.fps == 30 ? "Locked to 30 FPS with even frame pacing." : "Targets 60 FPS.";
-  case ROW_EFFECTS:
-    return light_mode < 0 ? "Available once the title screen loads."
-                                      : "Game's Light Mode: fewer effects. Next run.";
-  case ROW_FPS_COUNTER: return "Shows frames per second in the corner.";
-  case ROW_CHARACTER:
-    return cfg.character_original != character_original_at_boot ? "Restart the game to apply."
-                                                                  : "Original uses the game's env-map shader.";
-  default: return "";
-  }
-}
-
-static void change(int row, int dir) {
-  switch (row) {
-  case ROW_RESOLUTION:
-    cfg.resolution = (cfg.resolution + dir + PORT_RES_COUNT) % PORT_RES_COUNT;
-    apply_resolution();
-    break;
-  case ROW_GRAPHICS:
-    cfg.quality = (cfg.quality + dir + PORT_QUALITY_COUNT) % PORT_QUALITY_COUNT;
-    mono_port_quality_apply();
-    break;
-  case ROW_FPS:
-    cfg.fps = cfg.fps == 60 ? 30 : 60;
-    apply_fps();
-    break;
-  case ROW_EFFECTS: {
-    if (light_mode >= 0 && mono_port_set_light_mode(!light_mode)) light_mode = mono_port_light_mode();
-    return;  // Stored in the game's own save data.
-  }
-  case ROW_FPS_COUNTER: cfg.fps_counter = !cfg.fps_counter; break;
-  case ROW_CHARACTER: cfg.character_original = !cfg.character_original; break;
-  default: return;
-  }
-  settings_save();
-}
-
-// --- Overlay text (built on the Unity thread, drawn on the display thread) ---
-
-#define TEXT_ROWS 16
-#define TEXT_COLS 48
-typedef struct {
-  int rows;
-  char text[TEXT_ROWS][TEXT_COLS];
-  uint32_t color[TEXT_ROWS];
-  int highlight;  // Row index drawn with a selection bar, -1 for none.
-} overlay_text;
-
-static overlay_text overlays[2];
-static volatile int overlay_front = -1;  // -1: menu hidden.
+// --- CPU drawing --------------------------------------------------------------
 
 #define RGB(r, g, b) (0xFF000000u | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(r))
-#define COLOR_TEXT RGB(235, 235, 235)
-#define COLOR_TITLE RGB(255, 205, 40)
-#define COLOR_HINT RGB(150, 190, 255)
-#define COLOR_DIM RGB(150, 150, 150)
-
-static void build_overlay(void) {
-  int back = overlay_front == 0 ? 1 : 0;
-  overlay_text *o = &overlays[back];
-  memset(o, 0, sizeof(*o));
-  int r = 0;
-  snprintf(o->text[r], TEXT_COLS, "PORT SETTINGS");
-  o->color[r++] = COLOR_TITLE;
-  r++;
-  o->highlight = -1;
-  for (int i = 0; i < ROW_COUNT; i++) {
-    char value[32];
-    row_value(i, value, sizeof(value));
-    if (i == ROW_CLOSE) r++;
-    if (i == selected) o->highlight = r;
-    if (value[0])
-      snprintf(o->text[r], TEXT_COLS, "%-18s %c %-15s %c", row_names[i], i == selected ? '<' : ' ', value,
-               i == selected ? '>' : ' ');
-    else
-      snprintf(o->text[r], TEXT_COLS, "%s", row_names[i]);
-    o->color[r++] = COLOR_TEXT;
-  }
-  r++;
-  snprintf(o->text[r], TEXT_COLS, "%.44s", row_hint(selected));
-  o->color[r++] = COLOR_HINT;
-  snprintf(o->text[r], TEXT_COLS, "UP/DOWN select  LEFT/RIGHT change  O close");
-  o->color[r++] = COLOR_DIM;
-  o->rows = r;
-  __atomic_store_n(&overlay_front, back, __ATOMIC_RELEASE);
-}
 
 static void draw_rect(uint32_t *fb, int stride, int x, int y, int w, int h, uint32_t color) {
   for (int yy = y; yy < y + h; yy++) {
@@ -272,139 +122,201 @@ static void draw_text(uint32_t *fb, int stride, int x, int y, int g, const char 
   }
 }
 
-static unsigned shown_fps;
+// --- In-game FPS counter ------------------------------------------------------
 
-static void display_callback(void *framebuf) {
-  // FPS: one callback per presented frame.
-  static unsigned frames;
+static void fps_display_callback(void *framebuf) {
+  static unsigned frames, shown;
   static uint64_t window_start;
   uint64_t now = sceKernelGetProcessTimeWide();
   frames++;
   if (now - window_start >= 1000000) {
-    shown_fps = window_start ? (unsigned)((frames * 1000000ull + (now - window_start) / 2) / (now - window_start)) : 0;
+    shown = window_start ? (unsigned)((frames * 1000000ull + (now - window_start) / 2) / (now - window_start)) : 0;
     frames = 0;
     window_start = now;
   }
-
-  if (overlay_skip > 0) {
-    overlay_skip--;
-    return;
-  }
-  int w = DISPLAY_WIDTH, h = DISPLAY_HEIGHT, stride = DISPLAY_STRIDE;
-  if (w != port_screen_w || h != port_screen_h) return;
-  uint32_t *fb = framebuf;
-  int g = w * 16 / 960;  // 16 px at 960, 12 at 720, 10 at 640
-  if (g < 8) g = 8;
-
-  if (cfg.fps_counter) {
-    char text[16];
-    snprintf(text, sizeof(text), "%u FPS", shown_fps);
-    int tw = (int)strlen(text) * g;
-    draw_rect(fb, stride, 0, 0, tw + g, g + g / 2, RGB(0, 0, 0));
-    draw_text(fb, stride, g / 2, g / 4, g, text, shown_fps >= 55 ? RGB(80, 230, 80) : shown_fps >= 28 ? RGB(255, 205, 40) : RGB(255, 80, 80));
-  }
-
-  int front = __atomic_load_n(&overlay_front, __ATOMIC_ACQUIRE);
-  if (front < 0) return;
-  const overlay_text *o = &overlays[front];
-  int line = g + g / 2;
-  int pw = (TEXT_COLS - 2) * g, ph = (o->rows + 2) * line;
-  if (pw > w - 8) pw = w - 8;
-  int px = (w - pw) / 2, py = (h - ph) / 2;
-  int border = g / 6 > 1 ? g / 6 : 1;
-  draw_rect(fb, stride, px - border, py - border, pw + 2 * border, ph + 2 * border, RGB(255, 205, 40));
-  draw_rect(fb, stride, px, py, pw, ph, RGB(16, 24, 48));
-  for (int r = 0; r < o->rows; r++) {
-    int y = py + line + r * line;
-    if (r == o->highlight) draw_rect(fb, stride, px + g / 2, y - g / 6, pw - g, line, RGB(40, 80, 170));
-    draw_text(fb, stride, px + g, y, g, o->text[r], o->color[r]);
-  }
-}
-
-// --- Input -------------------------------------------------------------------
-
-#define COMBO (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_START)
-
-static void open_menu(void) {
-  menu_open = 1;
-  menu_closing = 0;
-  selected = 0;
-  light_mode = mono_port_light_mode();
-  input_release_all();
-  build_overlay();
-  L_INFO("port: settings menu opened");
-}
-
-static void close_menu(void) {
-  menu_open = 0;
-  menu_closing = 1;  // Keep the controls until every button is released.
-  __atomic_store_n(&overlay_front, -1, __ATOMIC_RELEASE);
-  L_INFO("port: settings menu closed");
-}
-
-int port_menu_tick(void) {
-  if (resize_next_frame) {
-    resize_next_frame = 0;
-    unity_resize_requested = 1;
-  }
-  SceCtrlData pad = {0};
-  if (sceCtrlPeekBufferPositive(0, &pad, 1) <= 0) pad.buttons = prev_buttons;
-  uint32_t buttons = pad.buttons, pressed = buttons & ~prev_buttons;
-  int combo_now = (buttons & COMBO) == COMBO, combo_before = (prev_buttons & COMBO) == COMBO;
-  prev_buttons = buttons;
-
-  if (menu_closing) {
-    if (buttons) return 1;
-    menu_closing = 0;
-    return 0;
-  }
-  if (!menu_open) {
-    if (combo_now && !combo_before && !ime_running()) {
-      open_menu();
-      return 1;
-    }
-    return 0;
-  }
-
-  static unsigned light_retry;
-  if (light_mode < 0 && ++light_retry % 30 == 0) light_mode = mono_port_light_mode();
-  if ((combo_now && !combo_before) || (pressed & SCE_CTRL_CIRCLE)) {
-    close_menu();
-    return 1;
-  }
-  // D-pad with auto-repeat while held.
-  uint64_t now = sceKernelGetProcessTimeWide();
-  uint32_t dirs = SCE_CTRL_UP | SCE_CTRL_DOWN | SCE_CTRL_LEFT | SCE_CTRL_RIGHT;
-  uint32_t act = pressed & (dirs | SCE_CTRL_CROSS);
-  if (pressed & dirs)
-    repeat_at = now + 400000;
-  else if ((buttons & (SCE_CTRL_UP | SCE_CTRL_DOWN)) && now >= repeat_at) {
-    act |= buttons & (SCE_CTRL_UP | SCE_CTRL_DOWN);
-    repeat_at = now + 120000;
-  }
-  if (act & SCE_CTRL_UP) selected = (selected + ROW_COUNT - 1) % ROW_COUNT;
-  if (act & SCE_CTRL_DOWN) selected = (selected + 1) % ROW_COUNT;
-  if (act & SCE_CTRL_LEFT) change(selected, -1);
-  if (act & SCE_CTRL_RIGHT) change(selected, +1);
-  if (act & SCE_CTRL_CROSS) {
-    if (selected == ROW_CLOSE) {
-      close_menu();
-      return 1;
-    }
-    change(selected, +1);
-  }
-  build_overlay();  // Also refreshes values the game changes (Effects).
-  return 1;
+  int g = DISPLAY_WIDTH * 16 / 960;  // 16 px at 960, 12 at 720, 10 at 640
+  char text[16];
+  snprintf(text, sizeof(text), "%u FPS", shown);
+  draw_rect(framebuf, DISPLAY_STRIDE, 0, 0, ((int)strlen(text) + 1) * g, g + g / 2, RGB(0, 0, 0));
+  draw_text(framebuf, DISPLAY_STRIDE, g / 2, g / 4, g, text,
+            shown >= 55 ? RGB(80, 230, 80) : shown >= 28 ? RGB(255, 205, 40) : RGB(255, 80, 80));
 }
 
 void port_menu_init(void) {
-  character_original_at_boot = cfg.character_original;
-  vglSetDisplayCallback(display_callback);
-  // vitaGL was created at the full 960x544 so its depth buffer fits every size.
-  port_screen_w = SCREEN_MAX_W;
-  port_screen_h = SCREEN_MAX_H;
-  apply_resolution();
-  resize_next_frame = 0;  // Unity is created at the new size; no resize needed.
+  if (cfg.fps_counter) vglSetDisplayCallback(fps_display_callback);
+  // A swap interval of 2 paces 30 fps on the 60 Hz display evenly.
   gl_set_swap_interval(cfg.fps == 30 ? 2 : 1);
-  L_INFO("port: settings menu ready (L + R + START)");
+}
+
+// --- Settings screen (before the game loads) ----------------------------------
+
+enum { ROW_RESOLUTION, ROW_GRAPHICS, ROW_FPS, ROW_FPS_COUNTER, ROW_CHARACTER, ROW_START, ROW_EXIT, ROW_COUNT };
+
+static const char *const row_names[ROW_COUNT] = {"Resolution", "Graphics", "Frame Rate", "FPS Counter",
+                                                 "Character Shader", "Start Game", "Exit"};
+static const char *const quality_names[] = {"Low", "Medium", "High"};
+
+static void row_value(int row, char *out, size_t size) {
+  switch (row) {
+  case ROW_RESOLUTION: snprintf(out, size, "%s", resolutions[cfg.resolution].name); break;
+  case ROW_GRAPHICS: snprintf(out, size, "%s", quality_names[cfg.quality]); break;
+  case ROW_FPS: snprintf(out, size, "%d FPS", cfg.fps); break;
+  case ROW_FPS_COUNTER: snprintf(out, size, "%s", cfg.fps_counter ? "On" : "Off"); break;
+  case ROW_CHARACTER: snprintf(out, size, "%s", cfg.character_original ? "Original" : "Compatible"); break;
+  default: out[0] = 0;
+  }
+}
+
+static const char *row_hint(int row) {
+  switch (row) {
+  case ROW_RESOLUTION:
+    return cfg.resolution == PORT_RES_QHD ? "Native Vita resolution." : "Rendered smaller, upscaled. Faster GPU.";
+  case ROW_GRAPHICS:
+    return cfg.quality == PORT_QUALITY_LOW ? "Game's Light quality. Quarter-size textures."
+           : cfg.quality == PORT_QUALITY_HIGH ? "Unity 'Simple' level: sharper filtering."
+                                              : "Game's Normal quality. Half-size textures.";
+  case ROW_FPS: return cfg.fps == 30 ? "Locked to 30 FPS with even frame pacing." : "Targets 60 FPS.";
+  case ROW_FPS_COUNTER: return "Shows frames per second in the corner.";
+  case ROW_CHARACTER:
+    return cfg.character_original ? "The game's original env-map shader." : "Stable diffuse shading (recommended).";
+  case ROW_START: return "Save and start the game.";
+  case ROW_EXIT: return "Save and return to the LiveArea.";
+  default: return "";
+  }
+}
+
+static void change(int row, int dir) {
+  switch (row) {
+  case ROW_RESOLUTION: cfg.resolution = (cfg.resolution + dir + PORT_RES_COUNT) % PORT_RES_COUNT; break;
+  case ROW_GRAPHICS: cfg.quality = (cfg.quality + dir + PORT_QUALITY_COUNT) % PORT_QUALITY_COUNT; break;
+  case ROW_FPS: cfg.fps = cfg.fps == 60 ? 30 : 60; break;
+  case ROW_FPS_COUNTER: cfg.fps_counter = !cfg.fps_counter; break;
+  case ROW_CHARACTER: cfg.character_original = !cfg.character_original; break;
+  default: return;
+  }
+  settings_save();
+}
+
+#define FB_W 960
+#define FB_H 544
+#define G 20      // glyph size in pixels
+#define LINE 34   // row height
+
+static void draw_screen(uint32_t *fb, int selected) {
+  // Background: vertical blue gradient.
+  for (int y = 0; y < FB_H; y++) {
+    uint32_t c = RGB(8, 24 + y * 40 / FB_H, 70 + y * 60 / FB_H);
+    uint32_t *p = fb + y * FB_W;
+    for (int x = 0; x < FB_W; x++) p[x] = c;
+  }
+  draw_rect(fb, FB_W, 0, 0, FB_W, 70, RGB(10, 20, 50));
+  draw_rect(fb, FB_W, 0, 70, FB_W, 3, RGB(255, 205, 40));
+  draw_text(fb, FB_W, 40, 25, G, "SONIC RUNNERS REVIVAL", RGB(255, 205, 40));
+  draw_text(fb, FB_W, 40 + 22 * G, 25, G, "- SETTINGS", RGB(235, 235, 235));
+
+  int y = 100;
+  for (int i = 0; i < ROW_COUNT; i++) {
+    if (i == ROW_START) y += LINE / 2;
+    if (i == selected) draw_rect(fb, FB_W, 30, y - 7, FB_W - 60, LINE, RGB(40, 80, 170));
+    uint32_t color = i == selected ? RGB(255, 255, 255) : RGB(200, 210, 230);
+    draw_text(fb, FB_W, 50, y, G, row_names[i], color);
+    char value[32];
+    row_value(i, value, sizeof(value));
+    if (value[0]) {
+      int vx = 480;
+      if (i == selected) draw_text(fb, FB_W, vx - 2 * G, y, G, "<", RGB(255, 205, 40));
+      draw_text(fb, FB_W, vx, y, G, value, color);
+      if (i == selected) draw_text(fb, FB_W, vx + 13 * G, y, G, ">", RGB(255, 205, 40));
+    }
+    y += LINE;
+  }
+  draw_rect(fb, FB_W, 0, FB_H - 92, FB_W, 3, RGB(255, 205, 40));
+  draw_rect(fb, FB_W, 0, FB_H - 89, FB_W, 89, RGB(10, 20, 50));
+  draw_text(fb, FB_W, 40, FB_H - 72, G, row_hint(selected), RGB(150, 190, 255));
+  draw_text(fb, FB_W, 40, FB_H - 36, 16, "UP/DOWN select   LEFT/RIGHT change   X confirm   O exit", RGB(150, 150, 150));
+}
+
+// LiveArea links arrive as "psgm:play?titleid=...&param=settings".
+int port_settings_requested(void) {
+  char param[1024];
+  memset(param, 0, sizeof(param));
+  if (sceAppMgrGetAppParam(param) >= 0 && strstr(param, "param=settings")) {
+    L_INFO("port: settings requested from the LiveArea");
+    return 1;
+  }
+  SceCtrlData pad;
+  memset(&pad, 0, sizeof(pad));
+  if (sceCtrlPeekBufferPositive(0, &pad, 1) > 0 && (pad.buttons & SCE_CTRL_SELECT)) {
+    L_INFO("port: settings requested by holding SELECT");
+    return 1;
+  }
+  return 0;
+}
+
+int port_settings_screen(void) {
+  const unsigned size = (FB_W * FB_H * 4 + 0x3FFFF) & ~0x3FFFF;
+  SceUID block = sceKernelAllocMemBlock("port_settings_fb", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, NULL);
+  void *base = NULL;
+  if (block < 0 || sceKernelGetMemBlockBase(block, &base) < 0) {
+    L_WARN("port: no display memory for the settings screen (0x%08X)", block);
+    return 1;
+  }
+  SceDisplayFrameBuf fb;
+  memset(&fb, 0, sizeof(fb));
+  fb.size = sizeof(fb);
+  fb.base = base;
+  fb.pitch = FB_W;
+  fb.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+  fb.width = FB_W;
+  fb.height = FB_H;
+
+  int selected = 0, result = -1;
+  uint32_t prev = ~0u;  // Ignore buttons still held from the launch.
+  uint64_t repeat_at = 0;
+  draw_screen(base, selected);
+  sceDisplaySetFrameBuf(&fb, SCE_DISPLAY_SETBUF_NEXTFRAME);
+  L_INFO("port: settings screen open");
+
+  while (result < 0) {
+    sceDisplayWaitVblankStart();
+    SceCtrlData pad;
+    memset(&pad, 0, sizeof(pad));
+    sceCtrlPeekBufferPositive(0, &pad, 1);
+    uint32_t buttons = pad.buttons, pressed = buttons & ~prev;
+    prev = buttons;
+    uint64_t now = sceKernelGetProcessTimeWide();
+    uint32_t vertical = SCE_CTRL_UP | SCE_CTRL_DOWN;
+    uint32_t act = pressed;
+    if (pressed & (vertical | SCE_CTRL_LEFT | SCE_CTRL_RIGHT))
+      repeat_at = now + 400000;
+    else if ((buttons & vertical) && now >= repeat_at) {
+      act |= buttons & vertical;
+      repeat_at = now + 120000;
+    }
+    if (!act) continue;
+    if (act & SCE_CTRL_UP) selected = (selected + ROW_COUNT - 1) % ROW_COUNT;
+    if (act & SCE_CTRL_DOWN) selected = (selected + 1) % ROW_COUNT;
+    if (act & SCE_CTRL_LEFT) change(selected, -1);
+    if (act & SCE_CTRL_RIGHT) change(selected, +1);
+    if (act & SCE_CTRL_CROSS) {
+      if (selected == ROW_START) result = 1;
+      else if (selected == ROW_EXIT) result = 0;
+      else change(selected, +1);
+    }
+    if (act & SCE_CTRL_CIRCLE) result = 0;
+    draw_screen(base, selected);
+  }
+
+  settings_save();
+  port_screen_w = resolutions[cfg.resolution].w;
+  port_screen_h = resolutions[cfg.resolution].h;
+  L_INFO("port: settings screen closed (%s)", result ? "start game" : "exit");
+  // Blank the display before giving the memory back; vitaGL sets its own
+  // buffers when the game starts.
+  memset(base, 0, FB_W * FB_H * 4);
+  sceDisplaySetFrameBuf(NULL, SCE_DISPLAY_SETBUF_NEXTFRAME);
+  sceDisplayWaitVblankStart();
+  sceDisplayWaitVblankStart();
+  sceKernelFreeMemBlock(block);
+  return result;
 }

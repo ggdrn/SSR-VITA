@@ -141,6 +141,13 @@ int main(void) {
   memset(&boot_param, 0, sizeof(boot_param));
   sceAppUtilInit(&init_param, &boot_param);
 
+  port_settings_load();
+  if (port_settings_requested() && !port_settings_screen()) {
+    log_finish();
+    sceKernelExitProcess(0);
+    return 0;
+  }
+
   observe_mark("requirements.begin");
   check_requirements();
   observe_mark("requirements.ready");
@@ -152,7 +159,6 @@ int main(void) {
     fatal_error("Could not read %s.\nIs the APK complete?", apk);
 
   observe_mark("apk.index.ready");
-  port_settings_load();
   fs_init(apk);
   proc_init();
   libc_bridge_init();

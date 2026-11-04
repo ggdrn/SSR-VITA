@@ -165,6 +165,7 @@ add_custom_command(
           -a ${CMAKE_SOURCE_DIR}/assets/game-splash.rgb=assets/game-splash.rgb
           -a ${SCE_SYS}/livearea/contents/bg.png=sce_sys/livearea/contents/bg.png
           -a ${SCE_SYS}/livearea/contents/startup.png=sce_sys/livearea/contents/startup.png
+          -a ${SCE_SYS}/livearea/contents/settings.png=sce_sys/livearea/contents/settings.png
           -a ${SCE_SYS}/livearea/contents/template.xml=sce_sys/livearea/contents/template.xml
           ${CMAKE_BINARY_DIR}/${VPK_NAME}
   DEPENDS eboot.bin ${CMAKE_BINARY_DIR}/param.sfo
@@ -173,6 +174,7 @@ add_custom_command(
           ${CMAKE_SOURCE_DIR}/assets/game-splash.rgb
           ${SCE_SYS}/livearea/contents/bg.png
           ${SCE_SYS}/livearea/contents/startup.png
+          ${SCE_SYS}/livearea/contents/settings.png
           ${SCE_SYS}/livearea/contents/template.xml
   VERBATIM)
 add_custom_target(vpk ALL DEPENDS ${CMAKE_BINARY_DIR}/${VPK_NAME})

@@ -340,7 +340,9 @@ void mono_texture_budget_tick(void) {
   }
 }
 
+static int quality_level_forced = -1;  // Port settings level; -1 keeps the game's.
 static void quality_level_with_texture_budget(int level, int expensive) {
+  if (quality_level_forced >= 0) level = quality_level_forced;
   // Any texture reload inside the quality change reads complete mip chains.
   bundle_mips_set_limit(0);
   quality_level_original(level, expensive);
@@ -1510,19 +1512,16 @@ void mono_probe(void) {
            boxed_f(pos, 2));
   }
 }
-// --- Port settings menu (src/port_menu.c) -----------------------------------
+// --- Port settings (src/port_menu.c) ----------------------------------------
 // Runs on the Unity thread between frames.
 
-void mono_port_frame_rate_apply(void) {
-  if (unity_image) race_frame_rate_tick();
-}
-
-// Keeps Unity on the quality level and texture size chosen in the port menu.
-// The game selects level 0 (Light Mode) or 1 (Normal) at the title screen;
-// that choice is replaced here, through the same native SetQualityLevel path
-// the texture budget guard uses.
+// Keeps Unity on the quality level and texture size chosen in the port
+// settings. The game's own SetQualityLevel calls (level 0 for Light Mode, 1
+// for Normal, at the title screen) are redirected to that level by the
+// texture budget wrapper; this also covers the level Unity starts with.
 void mono_port_quality_apply(void) {
   static int (*quality_get)(void);
+  quality_level_forced = port_unity_quality_level();
   if (!texture_budget_ready) texture_budget_init();
   if (texture_budget_ready != 1) return;
   if (!quality_get) {
@@ -1547,32 +1546,6 @@ void mono_port_quality_apply(void) {
   }
 }
 
-static MonoObject *port_save_manager(void) {
-  if (!game_image) return NULL;
-  return call_in(game_image, "SaveData", "SystemSaveManager", "get_Instance", NULL, NULL, 0);
-}
-
-int mono_port_light_mode(void) {
-  MonoObject *data = instance_call(port_save_manager(), "GetSystemdata", NULL, 0);
-  return data ? instance_bool(data, "get_lightMode") : -1;
-}
-
-// Same steps as the game's own performance window: set the flag and save.
-int mono_port_set_light_mode(int on) {
-  MonoObject *manager = port_save_manager();
-  MonoObject *data = instance_call(manager, "GetSystemdata", NULL, 0);
-  if (!data) return 0;
-  uint8_t value = on ? 1 : 0;
-  void *args[] = {&value};
-  instance_call(data, "set_lightMode", args, 1);
-  instance_call(manager, "SaveSystemData", NULL, 0);
-  L_INFO("port: game Light Mode -> %d (saved)", mono_port_light_mode());
-  return 1;
-}
-
-
-// Only query the scene name every 300 frames. Full object enumeration occurs
-// on transitions and infrequent snapshots, never in the render timing window.
 void mono_probe_tick(unsigned frame) {
   static char last_level[64];
   if (!unity_image && !probe_init()) return;
