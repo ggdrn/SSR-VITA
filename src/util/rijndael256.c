@@ -1,4 +1,5 @@
-// Accelerate the block primitive only; preserve Mono's decrypt/key/padding API.
+// Guarded block primitive shared with the optional native CBC path.
+// Preserve Mono's key expansion, padding and stream APIs.
 #include "rijndael256.h"
 #include "rijndael256_block.h"
 #include "rijndael256_il.h"
@@ -123,3 +124,20 @@ void rijndael256_install(void) {
 }
 unsigned rijndael256_fast_calls(void) { return __atomic_load_n(&fast_calls, __ATOMIC_RELAXED); }
 unsigned rijndael256_fallback_calls(void) { return __atomic_load_n(&fallback_calls, __ATOMIC_RELAXED); }
+
+// Only used after the separate CBC hook has validated the transform's mode,
+// block size and round count. No mutation until every array and alias guard
+// succeeds; unusual input follows the unmodified managed method.
+int rijndael256_try_cbc(void *self, void *input, void *output, void *iv, void *scratch, void *keys) {
+  if (!original || !self || object_class(self) != crypto_class || !keys ||
+      object_class(keys) != word_array_class || array_length(keys) < 120) return 0;
+  void *bytes[] = {input, output, iv, scratch};
+  for (unsigned i = 0; i < 4; i++)
+    if (!bytes[i] || object_class(bytes[i]) != byte_array_class || array_length(bytes[i]) < 32) return 0;
+  if (iv == scratch || iv == input || iv == output || scratch == input || scratch == output) return 0;
+  rijndael256_cbc_block((uint8_t *)array_data(input, 1, 0), (uint8_t *)array_data(output, 1, 0),
+                        (uint8_t *)array_data(iv, 1, 0), (uint8_t *)array_data(scratch, 1, 0),
+                        (uint32_t *)array_data(keys, 4, 0), &tables);
+  return 1;
+}
+int rijndael256_ready(void) { return original != NULL; }

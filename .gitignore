@@ -25,3 +25,9 @@ tests/stage_parse/bin/
 tests/stage_parse/obj/
 tests/stage_parse/unity/bin/
 tests/stage_parse/unity/obj/
+
+tests/ui_panel/bin/
+tests/ui_panel/obj/
+
+tests/rijndael_cbc/bin/
+tests/rijndael_cbc/obj/

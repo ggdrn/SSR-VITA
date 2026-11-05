@@ -65,6 +65,7 @@ add_executable(${PROJECT_NAME}
   src/util/work_trace.c
   src/util/buddy_ui.c
   src/util/rijndael256.c
+  src/util/rijndael_cbc.c
   src/util/stage_parse.c
   src/util/managed_trace.c
   src/util/ui_geometry.c

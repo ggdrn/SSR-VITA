@@ -6,7 +6,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 src = (root / 'src/mono_probe.c').read_text()
 a = src.index('static void patch_ui_sort_il(void)')
-b = src.index('// ReCreateTerrain', a)
+b = src.index('// An enabled widget', a)
 harness = r'''
 #include <stdint.h>
 #include <stdlib.h>

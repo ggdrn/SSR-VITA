@@ -22,7 +22,9 @@
 #include "util/terrain_gc.h"
 #include "util/ui_trim.h"
 #include "util/ui_sort.h"
+#include "util/ui_panel_il.h"
 #include "util/rijndael256.h"
+#include "util/rijndael_cbc.h"
 #include "util/stage_parse.h"
 #include "config.h"
 #include "port_menu.h"
@@ -579,6 +581,35 @@ static void patch_stage_il(void) {
   if (header) free_header(header);
 }
 
+// The stage manager disables its entire effect pool in LightMode, including
+// rings and power gems. Override only the manager's copied flag: stocking,
+// playback and returning effects to the pool then agree. Removing just the
+// early return in PlayEffect would leave those objects unstocked.
+static void patch_pickup_effects_il(void) {
+  so_module *mono = so_find_module("libmono.so");
+  void *(*get_header)(MonoMethod *) = (void *)so_symbol(mono, "mono_method_get_header");
+  const uint8_t *(*get_code)(void *, uint32_t *, uint32_t *) =
+    (void *)so_symbol(mono, "mono_method_header_get_code");
+  void (*free_header)(void *) = (void *)so_symbol(mono, "mono_metadata_free_mh");
+  if (!get_header || !get_code || !free_header) return;
+  MonoClass *klass = api.class_from_name(game_image, "", "StageEffectManager");
+  MonoMethod *method = klass ? api.get_method(klass, "StockStageEffect", 1) : NULL;
+  void *header = method ? get_header(method) : NULL;
+  uint32_t size = 0, stack = 0;
+  const uint8_t *code = header ? get_code(header, &size, &stack) : NULL;
+  // call GetSystemSaveData; brfalse; ldarg.0; call GetSystemSaveData;
+  // callvirt get_lightMode; stfld m_lightMode. Keep all control flow intact.
+  static const uint8_t prefix[] = {0x28,0x17,0x33,0,6,0x39,0x10,0,0,0,2,
+    0x28,0x17,0x33,0,6,0x6f,0xb9,0x32,0,6,0x7d,0x75,0x33,0,4};
+  static const uint8_t force_effects[] = {0x26,0x16,0,0,0}; // pop save; ldc.i4.0
+  if (code && size == 512 && !memcmp(code, prefix, sizeof(prefix))) {
+    kuKernelCpuUnrestrictedMemcpy((void *)(code + 0x10), force_effects, sizeof(force_effects));
+    kuKernelFlushCaches((void *)(code + 0x10), sizeof(force_effects));
+    L_INFO("effects: stage pickup pool enabled in LightMode (stock/play/sleep preserved)");
+  } else L_WARN("effects: StockStageEffect IL differs; stage effects left original");
+  if (header) free_header(header);
+}
+
 // BetterList<T>.Trim allocates an exact-size array for NGUI mesh uploads.
 // Retain allocation and all branches; let Array.Copy handle values/references
 // and GC write barriers instead of interpreting one ldelem/stelem per item.
@@ -627,8 +658,36 @@ static void patch_ui_sort_il(void) {
   if (code && stack >= 11 && size == sizeof(ui_sort_original) && !memcmp(code, ui_sort_original, size)) {
     kuKernelCpuUnrestrictedMemcpy((void *)code, ui_sort_adjacent, sizeof(ui_sort_adjacent));
     kuKernelFlushCaches((void *)code, sizeof(ui_sort_adjacent));
-    L_INFO("ui: BetterList stable adjacent sort installed (no full-list bubble passes; future JIT)");
+    L_INFO("ui: BetterList stable adjacent sort installed (legacy Mono compatible; future JIT)");
   } else L_WARN("ui: Sort IL/stack differs; original sort preserved");
+  if (header) free_header(header);
+}
+
+// An enabled widget already owned by this live panel needs neither the
+// lazy get_panel call nor Unity native object equality. Other cases retain
+// the original path, including disabled widgets and stale/destroyed owners.
+static void patch_ui_panel_il(void) {
+  FILE *marker = fopen(DATA_PATH "/original_ui_panel", "rb");
+  if (marker) { fclose(marker); L_INFO("ui: original panel owner lookup requested"); return; }
+  so_module *mono = so_find_module("libmono.so");
+  const char *(*guid)(MonoImage *) = (void *)so_symbol(mono, "mono_image_get_guid");
+  MonoMethod *(*get_method)(MonoImage *, uint32_t, MonoClass *) = (void *)so_symbol(mono, "mono_get_method");
+  void *(*get_header)(MonoMethod *) = (void *)so_symbol(mono, "mono_method_get_header");
+  const uint8_t *(*get_code)(void *, uint32_t *, uint32_t *) = (void *)so_symbol(mono, "mono_method_header_get_code");
+  void (*free_header)(void *) = (void *)so_symbol(mono, "mono_metadata_free_mh");
+  const char *id = guid ? guid(game_image) : NULL;
+  if (!id || strcasecmp(id, RACE_WARMUP_MVID) || !get_method || !get_header || !get_code || !free_header) {
+    L_WARN("ui: Panel assembly/API differs; original panel update preserved"); return;
+  }
+  MonoMethod *method = get_method(game_image, 0x06000439, NULL);
+  void *header = method ? get_header(method) : NULL;
+  uint32_t size = 0, stack = 0;
+  const uint8_t *code = header ? get_code(header, &size, &stack) : NULL;
+  if (code && stack >= 28 && size == sizeof(ui_panel_original) && !memcmp(code, ui_panel_original, size)) {
+    kuKernelCpuUnrestrictedMemcpy((void *)code, ui_panel_owned, sizeof(ui_panel_owned));
+    kuKernelFlushCaches((void *)code, sizeof(ui_panel_owned));
+    L_INFO("ui: UIPanel cached owner shortcut installed (enabled/lazy-owner fallback preserved; future JIT)");
+  } else L_WARN("ui: Panel IL/stack differs; original panel update preserved");
   if (header) free_header(header);
 }
 
@@ -780,8 +839,11 @@ static void observe_mono_label(MonoObject *value, char *out, unsigned cap) {
 }
 
 // The game requests 60 fps in menus and 30 fps in races with its LightMode.
-// Apply the port menu's frame rate (default 60) in every scene, including
-// after the game's own resets. Native icalls keep the poll allocation-free.
+// The port's display swap interval owns the 30/60 presentation cap. Keep
+// Unity's scheduler at 60 so selecting 30 does not also request a second
+// 33ms sleep budget inside nativeRender. Actual frames still follow the
+// display queue; this does not guarantee sufficient CPU/GPU throughput.
+// Native icalls keep the poll allocation-free, including after game resets.
 static void race_frame_rate_tick(void) {
   static int (*get_rate)(void);
   static void (*set_rate)(int);
@@ -796,13 +858,13 @@ static void race_frame_rate_tick(void) {
     get_rate = a; set_rate = b;
     L_INFO("perf: frame rate target ready (quality settings preserved)");
   }
-  int target = port_target_fps();
+  const int target = 60;
   int before = get_rate();
   if (before == target) return;
   set_rate(target);
   static unsigned changes;
   if (++changes <= 8 || (changes & (changes - 1)) == 0)
-    L_INFO("perf: targetFrameRate %d -> %d (request, not measured fps)", before, get_rate());
+    L_INFO("perf: engine targetFrameRate %d -> %d; display cap %d fps (request, not measured fps)", before, get_rate(), port_target_fps());
 }
 // Native integer/boolean getters avoid managed allocations in the poll. The
 // scene name is fetched only after its integer index changes.
@@ -1079,6 +1141,7 @@ void mono_menu_fix(void) {
   done = 1;
   L_INFO("menu: installed Facebook date guard");
   patch_stage_il();
+  patch_pickup_effects_il();
   patch_terrain_gc_il();
   patch_perf_il();
   patch_spawn_il();
@@ -1087,7 +1150,9 @@ void mono_menu_fix(void) {
   cache_timing_init();
   patch_ui_trim_il();
   patch_ui_sort_il();
+  patch_ui_panel_il();
   rijndael256_install();
+  rijndael_cbc_install();
   ui_geometry_install(game_image);
   buddy_ui_install(game_image);
   MonoClass *panel = api.class_from_name(game_image, "", "UIPanel");
@@ -1260,6 +1325,10 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
   } else manual_initialized = 0;
   static uint64_t worst_frame_us, worst_extra_us;
   static unsigned clone_calls, resource_calls, image_calls, unload_calls, managed_calls;
+  static uint64_t window_frame_us, window_wait_us, window_draw_us, window_present_us;
+  static uint64_t window_wall_start;
+  static uint64_t window_texture_us, window_link_us;
+  static unsigned window_frames, over_budget_frames;
   static gc_trace_sample worst_gc;
   work_sample work;
   work_trace_take(&work);
@@ -1270,6 +1339,16 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
   managed_calls += work.counter[WORK_MANAGED].calls;
   gl_perf_sample graphics;
   gl_perf_take(&graphics);
+  uint64_t window_now = sceKernelGetProcessTimeWide();
+  if (!window_wall_start) window_wall_start = window_now >= frame_us ? window_now - frame_us : window_now;
+  window_frames++;
+  window_frame_us += frame_us;
+  window_wait_us += work.counter[WORK_WAIT].us;
+  window_draw_us += graphics.draw_us;
+  window_present_us += graphics.present_us;
+  window_texture_us += graphics.texture_us;
+  window_link_us += graphics.link_us;
+  if (frame_us > (port_target_fps() == 30 ? 33334u : 16667u)) over_budget_frames++;
   gc_trace_sample samples[16];
   unsigned nsamples = gc_trace_read(samples);
   for (unsigned i = 0; i < nsamples; i++) {
@@ -1290,7 +1369,7 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
   previous_count = count;
   collections += delta;
   observe_frame(render_us, frame_us, delta > nsamples ? delta : nsamples);
-  if (frame_us > 100000 && (++spikes <= 8 || (spikes & (spikes - 1)) == 0)) {
+  if (frame_us > 50000 && (++spikes <= 8 || (spikes & (spikes - 1)) == 0)) {
     L_INFO("perf: spike frame %u render %.2f ms outside render %.2f ms GC %u traces %u",
            frame, render_us / 1000.0, extra_us / 1000.0, delta, nsamples);
     L_INFO("perf: graphics draw %.2f texture %.2f present %.2f link %.2f ms",
@@ -1324,6 +1403,20 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
     else slow_without_gc++;
   }
   if (frame % 600 == 0) {
+    // Wall times overlap: API time and imported waits are not a GPU timer or
+    // independent CPU buckets. The full-frame mean includes measured waits.
+    uint64_t elapsed_us = window_now - window_wall_start;
+    L_INFO("perf: window frames %u mean %.2f ms observed %.2f fps over-budget %u display-cap %d; imported-wait %.2f draw-api %.2f present-api %.2f texture-api %.2f link-api %.2f ms/frame (overlapping wall times)",
+           window_frames, window_frames ? window_frame_us / (1000.0 * window_frames) : 0.0,
+           elapsed_us ? window_frames * 1000000.0 / elapsed_us : 0.0,
+           over_budget_frames, port_target_fps(),
+           window_wait_us / (1000.0 * window_frames), window_draw_us / (1000.0 * window_frames),
+           window_present_us / (1000.0 * window_frames), window_texture_us / (1000.0 * window_frames),
+           window_link_us / (1000.0 * window_frames));
+    window_wall_start = window_now;
+    window_frames = over_budget_frames = 0;
+    window_frame_us = window_wait_us = window_draw_us = window_present_us = 0;
+    window_texture_us = window_link_us = 0;
     L_INFO("perf: GC collections %u slow with GC %u without GC %u heap %llu used %llu KiB",
            collections, slow_with_gc, slow_without_gc,
            (unsigned long long)api.gc_heap() / 1024, (unsigned long long)api.gc_used() / 1024);
@@ -1337,6 +1430,7 @@ void mono_perf_tick(uint64_t render_us, uint64_t frame_us, unsigned frame) {
     L_INFO("ui: buddy idle skips %u active forwards %u", managed_trace_idle_skipped(), managed_trace_idle_forwarded());
     L_INFO("ui: geometry bulk appends %u original fallbacks %u", ui_geometry_fast_calls(), ui_geometry_fallback_calls());
     L_INFO("stage: Rijndael256 native blocks %u original fallbacks %u", rijndael256_fast_calls(), rijndael256_fallback_calls());
+    L_INFO("stage: native CBC blocks %u managed fallbacks %u", rijndael_cbc_fast_calls(), rijndael_cbc_fallback_calls());
     managed_calls = 0;
     clone_calls = resource_calls = image_calls = unload_calls = 0;
     manual_total = 0;

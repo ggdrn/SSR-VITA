@@ -99,6 +99,28 @@ int main(void){
   unsigned length=a->length;a->length=i<2?31:119;decrypt_block(self,&input,&output,&keys);a->length=length;
  }
  assert(forwarded==10&&fallback_calls==10&&fast_calls==2);
+ // Exercise the CBC array guard boundary in the actual block module.
+ struct array iv={0},scratch={0};iv.type=scratch.type=&byte_type;iv.length=scratch.length=40;
+ memset(iv.data,0x12,sizeof(iv.data));memset(scratch.data,0x34,sizeof(scratch.data));
+ uint8_t expected_iv[40],expected_scratch[40],expected_out[40];
+ memcpy(expected_iv,iv.data,40);memcpy(expected_scratch,scratch.data,40);memcpy(expected_out,output.data,40);
+ rijndael256_cbc_block(input.data,expected_out,expected_iv,expected_scratch,(uint32_t *)keys.data,&tables);
+ assert(rijndael256_try_cbc(self,&input,&output,&iv,&scratch,&keys));
+ assert(!memcmp(expected_out,output.data,40)&&!memcmp(expected_iv,iv.data,40)&&!memcmp(expected_scratch,scratch.data,40));
+ uint8_t snapshots[4][1024];struct array *buffers[]={&input,&output,&iv,&scratch};
+ for(int i=0;i<4;i++)memcpy(snapshots[i],buffers[i]->data,1024);
+ assert(!rijndael256_try_cbc(NULL,&input,&output,&iv,&scratch,&keys));
+ assert(!rijndael256_try_cbc(self,&input,&output,&iv,&iv,&keys));
+ assert(!rijndael256_try_cbc(self,&input,&output,&input,&scratch,&keys));
+ assert(!rijndael256_try_cbc(self,&input,&output,&iv,&output,&keys));
+ assert(!rijndael256_try_cbc(self,&input,&output,&iv,&scratch,NULL));
+ for(int i=0;i<4;i++){
+  buffers[i]->length=31;assert(!rijndael256_try_cbc(self,&input,&output,&iv,&scratch,&keys));buffers[i]->length=40;
+  buffers[i]->type=&other_type;assert(!rijndael256_try_cbc(self,&input,&output,&iv,&scratch,&keys));buffers[i]->type=&byte_type;
+ }
+ keys.length=119;assert(!rijndael256_try_cbc(self,&input,&output,&iv,&scratch,&keys));keys.length=120;
+ for(int i=0;i<4;i++)assert(!memcmp(snapshots[i],buffers[i]->data,1024));
+ original=NULL;assert(!rijndael256_try_cbc(self,&input,&output,&iv,&scratch,&keys));
  assert(!safe_prologue(0xe59f0010)&&!safe_prologue(0xe92d8000)&&!safe_prologue(0xe58df004));
  puts("PASS: native Rijndael wrapper, array bounds/types/nulls, exact IL/MVID/API/header/table/layout/prologue guards, rollback, fallback trampoline and idempotence (ASan/UBSan)");
 }

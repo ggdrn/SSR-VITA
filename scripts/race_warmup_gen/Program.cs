@@ -6,7 +6,7 @@ using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using var pe = new PEReader(File.OpenRead(args[0]));
 var md = pe.GetMetadataReader();
-string[] prefixes = { "Obj", "Character", "Chao", "State", "Stage", "Movement", "ResPath", "Laser", "Drill", "Collision", "PlayerInformation", "GameModeStage", "HudCockpit", "HudScore", "HudRing", "HudCombo", "TerrainPlacementManager", "TenseEffectTable", "BossTypeUtil", "BossState", "TenseParameter" };
+string[] prefixes = { "Obj", "Character", "Chao", "State", "Stage", "Movement", "ResPath", "Laser", "Drill", "Collision", "PlayerInformation", "GameModeStage", "HudCockpit", "HudScore", "HudRing", "HudCombo", "TerrainPlacementManager", "TenseEffectTable", "BossTypeUtil", "BossState", "TenseParameter", "GameResult", "HudResult", "HudContinue", "HudCharacter", "GameReady", "GameStart", "MultiSet", "Msg", "RankingDataContainer", "ServerGameResults", "GlowUp", "HudInterpolate" };
 bool Open(TypeDefinitionHandle h) {
     var t = md.GetTypeDefinition(h);
     return t.GetGenericParameters().Count != 0 || (!t.GetDeclaringType().IsNil && Open(t.GetDeclaringType()));

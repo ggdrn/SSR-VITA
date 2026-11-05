@@ -75,6 +75,15 @@ static class Test {
     var descending=Enumerable.Range(0,n).Reverse().Cast<object?>().ToArray();
     var worstBefore=Sort<int>(original,descending,false);var worstAfter=Sort<int>(patched,descending,false);
     Check(worstAfter.Item2<=worstBefore.Item2+n);
+    byte[] previousBytes=(byte[])bytes.Clone();File.ReadAllBytes(args[3]).CopyTo(previousBytes,code);
+    var priorContext=new AssemblyLoadContext("previous",true);
+    priorContext.Resolving+=(ctx,name)=>name.Name==typeof(Test).Assembly.GetName().Name?typeof(Test).Assembly:null;
+    var previous=priorContext.LoadFromStream(new MemoryStream(previousBytes));
+    var priorReverse=Sort<int>(previous,descending,false);
+    Check(priorReverse.Item1.SequenceEqual(worstAfter.Item1));
+    Check(worstAfter.Item2==priorReverse.Item2);
+    Check(File.ReadAllBytes(args[3]).SequenceEqual(replacement));
+    Console.WriteLine($"PASS: restored prior gnome IL, reversed 1024 items: {priorReverse.Item2} -> {worstAfter.Item2} comparisons");
     Console.WriteLine($"PASS: 1400 original/patched sorts; values/references/nulls, stable ties, capacity/size/identity, exact APK IL/locals; late icon comparisons {a.Item2} -> {b.Item2}");
   }
 }

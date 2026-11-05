@@ -1,5 +1,6 @@
 // Exact supported APK BetterList<T>.Sort, changed to stable adjacent insertion
 // (gnome sort). Locals/signature/array capacity stay unchanged; no allocations.
+// Restored in 0.0.84: the 0.0.83 stack-carried insertion IL failed on game Mono.
 // Avoids full-list bubble passes when a newly loaded icon moves a short distance.
 #pragma once
 #include <stdint.h>

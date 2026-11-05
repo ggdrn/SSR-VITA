@@ -3,7 +3,7 @@
 from pathlib import Path
 import subprocess,tempfile
 src=(Path(__file__).resolve().parents[1]/'src/mono_probe.c').read_text()
-a=src.index('static void patch_stage_il(void) {');b=src.index('// BetterList<T>.Trim',a)
+a=src.index('static void patch_stage_il(void) {');b=src.index('// The stage manager disables',a)
 harness=r'''
 #include <stdint.h>
 #include <string.h>
