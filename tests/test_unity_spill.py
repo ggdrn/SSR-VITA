@@ -14,6 +14,7 @@ h=r'''
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+extern size_t __sanitizer_get_allocated_size(const void *);
 typedef enum { VGL_MEM_PHYCONT,VGL_MEM_RAM,VGL_MEM_VRAM } vglMemType;
 typedef struct {const char *name;} so_module;
 static int fail_native,allow_pool=1,is_unity=1,errors,native_frees,pool_frees,pool_attempts;
@@ -33,16 +34,23 @@ static void vglFree(void *base){
 static void *native_memalign(size_t align,size_t size){
  if(fail_native)return NULL;void *p=NULL;return posix_memalign(&p,align,size)?NULL:p;
 }
+static void *native_malloc(size_t size){return fail_native?NULL:malloc(size);}
+static void *native_calloc(size_t n,size_t size){return fail_native?NULL:calloc(n,size);}
+static void *native_realloc(void *p,size_t size){return fail_native && size?NULL:realloc(p,size);}
 static void native_free(void *p){
  for(int i=0;i<128;i++)assert(!blocks[i].raw || (uintptr_t)p<(uintptr_t)blocks[i].base || (uintptr_t)p>=(uintptr_t)blocks[i].base+blocks[i].size);
  native_frees++;free(p);
 }
 static int reject_free(const char *what,void *p,void *caller){return 0;}
 static void alloc_failed(const char *what,size_t size,size_t align,void *caller){errors++;}
-static so_module *so_module_at(uintptr_t caller){static so_module unity={"libunity.so"},other={"libmono.so"};return is_unity?&unity:&other;}
+static so_module *so_module_at(uintptr_t caller){static so_module unity={"libunity.so"},other={"libmono.so"};static so_module unknown={"other.so"};return is_unity==1?&unity:is_unity==0?&other:&unknown;}
 #define L_WARN(...) ((void)0)
 #define free native_free
 #define memalign native_memalign
+#define malloc native_malloc
+#define calloc native_calloc
+#define realloc native_realloc
+#define malloc_usable_size __sanitizer_get_allocated_size
 '''
 h+=src[a:b]+src[c:d]
 h+=r'''
@@ -64,7 +72,19 @@ int main(void){
  unsigned char *normal=realloc_bridge(s,3145728);assert(normal && !unity_spill_live && pool_frees==2);
  assert(normal[0]==0x6b);free_bridge(normal);
  fail_native=1;p=memalign_bridge(16,1048576);assert(p);assert(!realloc_bridge(p,0) && !unity_spill_live);
- int before=pool_attempts;is_unity=0;assert(!memalign_bridge(16,1048576) && pool_attempts==before);is_unity=1;
+ // Reproduce the release: a Mono 2 MiB native array grows to 8 MiB
+ // while native realloc fails. All existing bytes survive the pool move.
+ fail_native=0;is_unity=0;unsigned char *old=malloc_bridge(2097152);assert(old);memset(old,0xa7,2097152);
+ fail_native=1;unsigned char *grown=realloc_bridge(old,8388608);assert(grown && unity_spill_live==1);
+ for(int i=0;i<2097152;i++)assert(grown[i]==0xa7);
+ allow_pool=0;assert(!realloc_bridge(grown,16777216) && grown[0]==0xa7 && unity_spill_live==1);
+ allow_pool=1;free_bridge(grown);assert(!unity_spill_live);
+ void *m=malloc_bridge(1048576);assert(m);free_bridge(m);
+ unsigned char *zero=calloc_bridge(1048576,1);assert(zero);for(int i=0;i<1048576;i++)assert(!zero[i]);free_bridge(zero);
+ assert(!calloc_bridge(SIZE_MAX,2));
+ fail_native=0;old=malloc_bridge(1048576);assert(old);old[0]=19;
+ fail_native=1;allow_pool=0;assert(!realloc_bridge(old,8388608) && old[0]==19);free_bridge(old);allow_pool=1;
+ int before=pool_attempts;is_unity=2;assert(!memalign_bridge(16,1048576) && pool_attempts==before);is_unity=1;
  assert(!memalign_bridge(3,1048576) && !memalign_bridge(16,SIZE_MAX) && pool_attempts==before);
  void *many[32];for(int i=0;i<32;i++){many[i]=memalign_bridge(16,1048576);assert(many[i]);}
  before=pool_attempts;assert(!memalign_bridge(16,1048576) && pool_attempts==before);
@@ -72,7 +92,7 @@ int main(void){
  pthread_t threads[8];for(int i=0;i<8;i++)assert(!pthread_create(&threads[i],NULL,worker,NULL));
  for(int i=0;i<8;i++)pthread_join(threads[i],NULL);
  assert(!unity_spill_live);for(int i=0;i<128;i++)assert(!blocks[i].raw);
- puts("PASS: Unity-only recovery, alignment, correct free ownership, realloc preservation/failure/zero, table bounds, 8 concurrent users");
+ puts("PASS: Unity/Mono recovery including 2-to-8 MiB realloc, alignment, correct free ownership, realloc preservation/failure/zero, table bounds, 8 concurrent users");
 }
 '''
 with tempfile.TemporaryDirectory() as d:

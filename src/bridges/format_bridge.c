@@ -120,7 +120,7 @@ static const char *bad_chunk(void *ptr) {
   return NULL;
 }
 
-// Large Unity allocations can fail in a fragmented newlib heap while the
+// Large guest allocations can fail in a fragmented newlib heap while the
 // mapped vitaGL pools still have room. Track ownership explicitly: pointers
 // borrowed from those pools must never reach newlib's free/realloc.
 #define UNITY_SPILL_SLOTS 32
@@ -186,8 +186,16 @@ static void *spill_alloc(size_t align, size_t size) {
     break;
   }
   pthread_mutex_unlock(&unity_spill_lock);
-  if (result) L_WARN("mem: recovered fragmented Unity allocation %u bytes align %u using mapped pool %d", size, align, pool);
+  if (result) L_WARN("mem: recovered fragmented engine allocation %u bytes align %u using mapped pool %d", size, align, pool);
   return result;
+}
+
+// Mono's native metadata arrays use the same C allocator. In the release
+// log an 8 MiB realloc failed with 46 MiB free in fragmented small chunks.
+// Recover only native buffers owned by these two loaded engines.
+static int spill_caller(void *address) {
+  so_module *caller = so_module_at((uintptr_t)address);
+  return caller && (!strcmp(caller->name, "libunity.so") || !strcmp(caller->name, "libmono.so"));
 }
 
 static int bad_free_reports;
@@ -216,13 +224,19 @@ void free_bridge(void *ptr) {
 
 void *malloc_bridge(size_t size) {
   void *p = malloc(size);
+  if (!p && spill_caller(__builtin_return_address(0))) p = spill_alloc(8, size);
   if (!p && size)
     alloc_failed("malloc", size, 0, __builtin_return_address(0));
   return p;
 }
 
 void *calloc_bridge(size_t n, size_t size) {
+  if (size && n > SIZE_MAX / size) return NULL;
   void *p = calloc(n, size);
+  if (!p && n && size && spill_caller(__builtin_return_address(0))) {
+    p = spill_alloc(8, n * size);
+    if (p) memset(p, 0, n * size);
+  }
   if (!p && n && size)
     alloc_failed("calloc", n * size, 0, __builtin_return_address(0));
   return p;
@@ -244,6 +258,16 @@ void *realloc_bridge(void *old, size_t size) {
   if (old && reject_free("realloc", old, __builtin_return_address(0)))
     old = NULL;
   void *p = realloc(old, size);
+  if (!p && size && spill_caller(__builtin_return_address(0))) {
+    // A failed realloc leaves old alive. Copy only its usable bytes, and
+    // release it only after the replacement has been registered successfully.
+    p = spill_alloc(8, size);
+    if (p && old) {
+      old_size = malloc_usable_size(old);
+      memcpy(p, old, old_size < size ? old_size : size);
+      free(old);
+    }
+  }
   if (!p && size)
     alloc_failed("realloc", size, 0, __builtin_return_address(0));
   return p;
@@ -252,8 +276,7 @@ void *realloc_bridge(void *old, size_t size) {
 void *memalign_bridge(size_t align, size_t size) {
   void *p = memalign(align, size);
   if (!p && size >= 1024 * 1024) {
-    so_module *caller = so_module_at((uintptr_t)__builtin_return_address(0));
-    if (caller && !strcmp(caller->name, "libunity.so")) p = spill_alloc(align, size);
+    if (spill_caller(__builtin_return_address(0))) p = spill_alloc(align, size);
   }
   if (!p && size) alloc_failed("memalign", size, align, __builtin_return_address(0));
   return p;
