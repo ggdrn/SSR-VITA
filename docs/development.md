@@ -40,7 +40,9 @@ workspace/
     └── libvitaGL.a
 ```
 
-Prepare vitaGL with the compatible changes in [patches/](../patches/), including shader compilation failure handling, shader caching, and texture allocation failure handling. The development checkout was based on vitaGL commit `76f43e6`; applying these patches to another revision may require adjustments. Build that checkout with:
+Prepare vitaGL with the compatible changes in [patches/](../patches/), including shader compilation failure handling, shader caching, texture allocation failure handling, and active vertex attribute enumeration (`vitagl-active-attrib.patch`), and validation of all packed vertex streams
+(`vitagl-vertex-streams.patch`), and boot shader preparation
+(`vitagl-shader-preload.patch`). The development checkout was based on vitaGL commit `76f43e6`; applying these patches to another revision may require adjustments. Build that checkout with:
 
 ```sh
 make -C ../vitaGL HAVE_SHARK_LOG=1 HAVE_SHADER_CACHE=1
@@ -52,8 +54,8 @@ To build the public release from the repository root:
 ./scripts/build.sh --release
 ```
 
-Release versions are configured in `cmake/ReleaseVersion.cmake`. Release `0.1` produces
-`build/VPK/SRR-Vita-v0.01.00.vpk`, with Vita `APP_VER=00.10`. The internal development
+Release versions are configured in `cmake/ReleaseVersion.cmake`. Release `0.4` produces
+`build/VPK/SRR-Vita-v0.04.00.vpk`, with Vita `APP_VER=00.40`. The internal development
 counter in `VERSION` is preserved. Plain CMake builds can select this mode with
 `-DSRR_RELEASE_BUILD=ON`.
 
@@ -66,7 +68,7 @@ To rebuild the current development package instead:
 This preserves `VERSION` and produces the current package in:
 
 ```text
-build/VPK/SRR-Vita-v0.0.64.vpk
+build/VPK/SRR-Vita-v0.0.86.vpk
 ```
 
 To increment the build number and create a new version:
@@ -113,7 +115,7 @@ python3 scripts/report_observation.py /path/to/srr_log.txt --out-dir build/repor
 
 The report includes observed scenes, frame windows, asset operations, and capture-health counters. Loading states can include user interaction, and nested timings must not be added as if they were independent waits.
 
-Version-by-version investigations are available in [docs/](.). These historical diagnostics are primarily in Portuguese. See [the 0.0.64 investigation](diagnostico-0.0.64.md) for the current startup and networking findings.
+Version-by-version investigations are available in [docs/](.). These historical diagnostics are primarily in Portuguese. See [the 0.4 release notes](releases/0.4.md) for the public changelog and [the 0.0.86 investigation](diagnostico-0.0.86.md) for the latest race-loading findings and validation limits.
 
 ## Architecture
 

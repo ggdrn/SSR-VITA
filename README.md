@@ -12,6 +12,8 @@ Play **Sonic Runners Revival** on your PlayStation Vita, with touchscreen and ph
 
 The game APK is not included. No OBB extraction is required. Required data downloads automatically and is saved locally. If a download fails, close the game and reopen it to retry.
 
+See the [release 0.4 changelog](docs/releases/0.4.md) for new features, fixes, and known limitations.
+
 ## Port settings
 
 Tap **SETTINGS** in the LiveArea to open the port menu on a black background,
