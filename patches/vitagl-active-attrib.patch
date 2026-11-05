@@ -1,0 +1,64 @@
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -3679,33 +3679,41 @@
+ void glGetActiveAttrib(GLuint prog, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name) {
+ 	THREAD_SAFE()
+ 
++	program *p = &progs[prog - 1];
+ #ifndef SKIP_ERROR_HANDLING
+-	if (bufSize < 0) {
++	if (bufSize < 0 || index >= p->attr_num) {
+ 		SET_GL_ERROR(GL_INVALID_VALUE)
+ 	}
+ #endif
+-
+-	// Grabbing passed program
+-	program *p = &progs[prog - 1];
+-
+-	int i, cnt = sceGxmProgramGetParameterCount(p->vshader->prog);
++	// GLES index enumerates active attributes; it is NOT a GXM register
++	// index (nor a register index divided by four). Uniform parameters may
++	// be interleaved with attributes, and optimized registers may be sparse.
++	uint32_t cnt = sceGxmProgramGetParameterCount(p->vshader->prog);
+ 	uint32_t *ptr = vglProgramGetParameterBase(p->vshader->prog);
+-	SceGxmProgramParameter *param;
+-	for (i = 0; i < cnt; i++) {
+-		param = (SceGxmProgramParameter *)ptr;
+-		if (sceGxmProgramParameterGetCategory(param) == SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE && (sceGxmProgramParameterGetResourceIndex(param) / 4) == index)
++	SceGxmProgramParameter *param = NULL;
++	GLuint active = 0;
++	for (uint32_t i = 0; i < cnt; i++, ptr += 4) {
++		SceGxmProgramParameter *candidate = (SceGxmProgramParameter *)ptr;
++		if (sceGxmProgramParameterGetCategory(candidate) != SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE)
++			continue;
++		if (active++ == index) {
++			param = candidate;
+ 			break;
+-		ptr += 4;
++		}
+ 	}
+-
+-	// Copying attribute name
+-	const char *pname = sceGxmProgramParameterGetName(param);
+-	bufSize = min(strlen(pname), bufSize - 1);
+-	if (length)
+-		*length = bufSize;
+-	strncpy(name, pname, bufSize);
+-	name[bufSize] = 0;
+-
++	if (!param) {
++		SET_GL_ERROR(GL_INVALID_VALUE)
++		return;
++	}
++	if (bufSize > 0) {
++		const char *pname = sceGxmProgramParameterGetName(param);
++		GLsizei copied = min(strlen(pname), (size_t)bufSize - 1);
++		memcpy(name, pname, copied);
++		name[copied] = 0;
++		if (length) *length = copied;
++	} else if (length) {
++		*length = 0;
++	}
+ 	*type = gxm_attr_type_to_gl(sceGxmProgramParameterGetComponentCount(param), sceGxmProgramParameterGetArraySize(param));
+ 	*size = 1;
+ }

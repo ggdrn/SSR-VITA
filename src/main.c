@@ -12,7 +12,9 @@
 #include "util/log.h"
 #include "net/http.h"
 #include "port_menu.h"
+#include "util/shader_warmup.h"
 
+#include <vitaGL.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -139,7 +141,8 @@ int main(int argc, char *argv[]) {
   SceAppUtilBootParam boot_param;
   memset(&init_param, 0, sizeof(init_param));
   memset(&boot_param, 0, sizeof(boot_param));
-  sceAppUtilInit(&init_param, &boot_param);
+  int apputil_result = sceAppUtilInit(&init_param, &boot_param);
+  L_INFO("port: AppUtil init=0x%08X boot attribute=0x%X", apputil_result, boot_param.attr);
 
   port_settings_load();
   if (port_settings_requested(argc, argv) && !port_settings_screen()) {
@@ -182,12 +185,14 @@ int main(int argc, char *argv[]) {
   log_free_memory("after libraries");
   observe_mark("graphics.begin");
   gl_bridge_init();
+  shader_cache_warmup();
   port_menu_init();
   observe_mark("graphics.ready");
   log_free_memory("after vitaGL");
 
   observe_mark("unity.begin");
   int r = unity_run();
+  vglReleasePreloadedShaderCache();
   observe_stop();
   L_INFO("game exited with %d", r);
   log_finish();

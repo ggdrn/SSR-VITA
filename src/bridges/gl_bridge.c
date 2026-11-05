@@ -118,12 +118,12 @@ void *eglCreateContext_bridge(void *dpy, void *cfg, void *share, const int *attr
 int eglDestroyContext_bridge(void *dpy, void *ctx) { return egl_ok(); }
 int eglMakeCurrent_bridge(void *dpy, void *draw, void *read, void *ctx) { return egl_ok(); }
 
-static unsigned shader_cache_counts[5];
+static unsigned shader_cache_counts[6];
 static unsigned observed_link_program;
 void vgl_shader_cache_event(unsigned event) {
-  if (event < 5) {
+  if (event < 6) {
     __atomic_fetch_add(&shader_cache_counts[event], 1, __ATOMIC_RELAXED);
-    const char *names[] = {"cache-hit", "cache-miss", "cache-saved", "cache-error", "compiler-invoked"};
+    const char *names[] = {"cache-hit", "cache-miss", "cache-saved", "cache-error", "compiler-invoked", "boot-preload-used"};
     char label[64]; unsigned program = __atomic_load_n(&observed_link_program, __ATOMIC_RELAXED);
     snprintf(label, sizeof(label), "%s program=%u", names[event], program);
     if (event == 1 || event == 3 || event == 4) observe_span(OBS_SHADER, label, observe_now(), 0, event, program);
@@ -314,13 +314,13 @@ static char *rename_reserved(const char *src) {
   return NULL;
 }
 
-// The character's two-pass material links successfully, but its legacy
-// vertex-light/envmap path does not produce a visible body on this renderer.
-// The environment/normal variant produced corrupted colors on some player
-// materials. Restore the diffuse compatibility pair used before v57.
-// A marker file permits comparison with the original material on hardware.
+// Preserve the game's diffuse/envmap equation instead of flattening every
+// character to an unlit texture. The common variant also serves world models;
+// it has no Z offset and uses signed Lambert rather than half-Lambert.
 static int character_compat = 1;
-static const char character_vertex[] =
+static int material_shaders = 1;
+// Stable diffuse pair used before the lit/envmap material replacement.
+static const char diffuse_vertex[] =
   "attribute vec4 _glesVertex;\n"
   "attribute vec4 _glesMultiTexCoord0;\n"
   "uniform highp mat4 glstate_matrix_mvp;\n"
@@ -330,24 +330,89 @@ static const char character_vertex[] =
   "void main() { gl_Position = glstate_matrix_mvp * _glesVertex;\n"
   "gl_Position.z += _InnerZOffset * 0.01;\n"
   "xlv_TEXCOORD0 = _glesMultiTexCoord0.xy * _DifTex_ST.xy + _DifTex_ST.zw; }\n";
-static const char character_fragment[] =
+static const char diffuse_fragment[] =
   "precision mediump float;\n"
   "uniform sampler2D _DifTex;\n"
   "uniform highp vec4 _DifCol;\n"
   "varying highp vec2 xlv_TEXCOORD0;\n"
   "void main() { gl_FragColor = vec4(texture2D(_DifTex, xlv_TEXCOORD0).rgb * _DifCol.rgb, 1.0); }\n";
+#define CHARACTER_VERTEX_BODY \
+  "attribute vec4 _glesVertex;\n" \
+  "attribute vec3 _glesNormal;\n" \
+  "attribute vec4 _glesMultiTexCoord0;\n" \
+  "uniform highp mat4 glstate_matrix_mvp;\n" \
+  "uniform highp mat4 glstate_matrix_invtrans_modelview0;\n" \
+  "uniform highp vec4 unity_LightPosition[8];\n" \
+  "uniform highp vec4 unity_LightColor[8];\n" \
+  "uniform highp vec4 glstate_lightmodel_ambient;\n" \
+  "uniform highp vec4 _DifTex_ST;\n" \
+  "#ifndef SRR_COMMON\n" \
+  "uniform highp float _InnerZOffset;\n" \
+  "#endif\n" \
+  "#ifdef SRR_SCROLL\n" \
+  "uniform highp vec4 _ScrollingSpeed;\n" \
+  "uniform highp vec4 _Time;\n" \
+  "#endif\n" \
+  "varying highp vec4 xlv_COLOR;\n" \
+  "varying highp vec2 xlv_TEXCOORD0;\n" \
+  "varying highp vec2 xlv_TEXCOORD1;\n" \
+  "highp vec3 srr_unit(highp vec3 v) { return v * inversesqrt(max(dot(v,v), 0.00000001)); }\n" \
+  "void main() {\n" \
+  "gl_Position = glstate_matrix_mvp * _glesVertex;\n" \
+  "#ifndef SRR_COMMON\n" \
+  "gl_Position.z += _InnerZOffset * 0.01;\n" \
+  "#endif\n" \
+  "#ifdef SRR_SCROLL\n" \
+  "xlv_TEXCOORD0 = _glesMultiTexCoord0.xy + fract(_ScrollingSpeed.xy * _Time.y) * _DifTex_ST.xy + _DifTex_ST.zw;\n" \
+  "#else\n" \
+  "xlv_TEXCOORD0 = _glesMultiTexCoord0.xy * _DifTex_ST.xy + _DifTex_ST.zw;\n" \
+  "#endif\n" \
+  "highp vec3 n = srr_unit(_glesNormal);\n" \
+  "highp vec4 env = glstate_matrix_invtrans_modelview0 * vec4(n, 1.0);\n" \
+  "xlv_TEXCOORD1 = env.xy * 0.5 + 0.5;\n" \
+  "highp vec3 l = (unity_LightPosition[0] * glstate_matrix_invtrans_modelview0).xyz;\n" \
+  "if (unity_LightPosition[0].w != 0.0) l -= _glesVertex.xyz;\n" \
+  "highp float diffuse = dot(n, srr_unit(l));\n" \
+  "#ifndef SRR_COMMON\n" \
+  "diffuse = diffuse * 0.5 + 0.5;\n" \
+  "#endif\n" \
+  "xlv_COLOR = vec4(diffuse * unity_LightColor[0].rgb + glstate_lightmodel_ambient.rgb, diffuse);\n" \
+  "if (dot(unity_LightColor[0].rgb, unity_LightColor[0].rgb) + dot(glstate_lightmodel_ambient.rgb, glstate_lightmodel_ambient.rgb) < 0.00000001) xlv_COLOR = vec4(0.5, 0.5, 0.5, 0.5);\n" \
+  "}\n"
+static const char character_vertex[] = CHARACTER_VERTEX_BODY;
+static const char common_vertex[] = "#define SRR_COMMON\n" CHARACTER_VERTEX_BODY;
+static const char scrolling_vertex[] = "#define SRR_SCROLL\n" CHARACTER_VERTEX_BODY;
+#undef CHARACTER_VERTEX_BODY
+static const char character_fragment[] =
+  "precision mediump float;\n"
+  "uniform sampler2D _DifTex;\n"
+  "uniform sampler2D _EnvTex;\n"
+  "uniform highp vec4 _DifCol;\n"
+  "varying highp vec4 xlv_COLOR;\n"
+  "varying highp vec2 xlv_TEXCOORD0;\n"
+  "varying highp vec2 xlv_TEXCOORD1;\n"
+  "void main() { highp vec4 tex = texture2D(_DifTex, xlv_TEXCOORD0);\n"
+  "highp vec3 env = texture2D(_EnvTex, xlv_TEXCOORD1).rgb;\n"
+  "gl_FragColor = vec4(2.0 * (xlv_COLOR.rgb * _DifCol.rgb * tex.rgb + env * tex.a * xlv_COLOR.a), 1.0); }\n";
 
 static const char *character_shader_source(GLenum type, const char *source) {
   if (!character_compat) return source;
-  int vertex = type == GL_VERTEX_SHADER && strstr(source, "_InnerZOffset") &&
-    strstr(source, "_DifTex_ST") && strstr(source, "unity_LightPosition") &&
-    strstr(source, "glstate_matrix_invtrans_modelview0");
+  int vertex = type == GL_VERTEX_SHADER && strstr(source, "_DifTex_ST") &&
+    strstr(source, "unity_LightPosition") && strstr(source, "glstate_matrix_invtrans_modelview0") &&
+    strstr(source, "xlv_COLOR") && strstr(source, "xlv_TEXCOORD1") && !strstr(source, "_RimPower");
+  // Glass/falloff shaders share these sampler names, but not this equation.
+  // Replacing their fragment alone used to mismatch the original vertex stage.
   int fragment = type == GL_FRAGMENT_SHADER && strstr(source, "_DifTex") &&
     strstr(source, "_EnvTex") && strstr(source, "_DifCol") &&
-    strstr(source, "xlv_COLOR") && strstr(source, "xlv_TEXCOORD1");
+    strstr(source, "texCol_2.w") && strstr(source, "xlv_COLOR.w") &&
+    strstr(source, "vec3(2.0, 2.0, 2.0)") && !strstr(source, "_RimPower");
   if (!vertex && !fragment) return source;
-  L_INFO("gl: character diffuse compatibility %s shader selected (envmap rollback)", vertex ? "vertex" : "fragment");
-  return vertex ? character_vertex : character_fragment;
+  L_INFO("gl: %s %s shader selected", material_shaders ? "lit diffuse/envmap compatibility" : "simple diffuse compatibility",
+         vertex ? "vertex" : "fragment");
+  if (!material_shaders) return vertex ? diffuse_vertex : diffuse_fragment;
+  if (fragment) return character_fragment;
+  if (strstr(source, "_ScrollingSpeed")) return scrolling_vertex;
+  return strstr(source, "_InnerZOffset") ? character_vertex : common_vertex;
 }
 
 void glShaderSource_bridge(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
@@ -649,6 +714,7 @@ static void gl_frame_stats(void) {
     for (unsigned i = 0; i < 5; i++) cache[i] = __atomic_load_n(&shader_cache_counts[i], __ATOMIC_RELAXED);
     L_INFO("gl: shader cache hits %u misses %u saved %u errors %u compiler calls %u",
            cache[0], cache[1], cache[2], cache[3], cache[4]);
+    L_INFO("gl: boot-prepared shader programs reused %u", __atomic_load_n(&shader_cache_counts[5], __ATOMIC_RELAXED));
     draws_skipped = draws_no_program = 0;
   }
   draws_this_frame = 0;
@@ -786,6 +852,20 @@ void glLinkProgram_bridge(GLuint prog) {
       L_INFO("gl: program %u took %u ms to compile and link", prog, (unsigned)(us / 1000));
   }
   check_link(prog);
+  // Record the reflected channels for lit materials. Successful compilation
+  // alone does not tell us whether Unity sees the normal and UV attributes.
+  GLuint vertex = prog < 1025 ? program_shaders[prog][0] : 0;
+  const char *source = vertex < MAX_SHADERS ? shader_sources[vertex] : NULL;
+  if (prog < 1025 && prog_linked[prog] && source && strstr(source, "unity_LightPosition")) {
+    GLint active = 0;
+    glGetProgramiv(prog, GL_ACTIVE_ATTRIBUTES, &active);
+    for (GLint i = 0; i < active && i < 16; i++) {
+      GLchar name[96] = {0}; GLsizei length = 0; GLint size = 0; GLenum type = 0;
+      glGetActiveAttrib(prog, i, sizeof(name), &length, &size, &type, name);
+      L_INFO("gl: lit material program %u attribute %d name=%s location=%d type=0x%X size=%d",
+             prog, i, name, glGetAttribLocation(prog, name), type, size);
+    }
+  }
   char observed_name[96];
   snprintf(observed_name, sizeof(observed_name), "program=%u vertex=%u fragment=%u", prog,
            prog < 1025 ? program_shaders[prog][0] : 0, prog < 1025 ? program_shaders[prog][1] : 0);
@@ -817,9 +897,10 @@ void glDeleteProgram_bridge(GLuint prog) {
 }
 
 void gl_bridge_init(void) {
-  // Port menu setting (the old original_character_shader marker file sets its default).
-  character_compat = !port_character_shader_original();
-  L_INFO("gl: character shader mode %s", character_compat ? "diffuse compatibility (envmap rollback)" : "original");
+  character_compat = 1;
+  material_shaders = port_material_shaders();
+  L_INFO("gl: material shaders %s (%s)", material_shaders ? "on" : "off",
+         material_shaders ? "lit diffuse/envmap compatibility" : "simple diffuse compatibility");
   // Keep standard optimization rather than unsafe algebra on legacy Unity
   // shaders; lighting normalizes vectors that can be zero during transitions.
   vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, SHARK_DISABLE, SHARK_ENABLE, SHARK_ENABLE);

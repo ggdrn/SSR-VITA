@@ -15,6 +15,11 @@ src=(root.parent/'vitaGL/source/custom_shaders.c').read_text()
 a=src.index('void vgl_shader_cache_event(unsigned event)');b=src.index('#ifdef HAVE_SHADER_CACHE\n#define vgl_compile_shader',a)
 # Keep GLSL metadata guard intact; remove only the final enclosing #endif.
 loader=src[a:b];idx=loader.rfind('#endif');loader=loader[:idx]+loader[idx+6:]
+start=loader.index('// Boot-time prepared programs')
+end=loader.index('static GLboolean load_cached_shader',start)
+loader=loader[:start]+'static int take_preloaded_shader(const char *p,shader *s,int bindings){return 0;}\n'+loader[end:]
+loader=loader[:loader.index('const char *vglGetShaderCachePath')]
+
 a=src.index('\tcache_fname[fname_len - 21] = 0;');b=src.index('\n#endif\n}',a)
 writer=src[a:b]
 h=r'''#include <assert.h>

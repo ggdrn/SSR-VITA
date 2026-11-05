@@ -1,0 +1,136 @@
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -741,14 +741,29 @@
+ #endif
+ 	s->size = sz - ((uintptr_t)buf - (uintptr_t)in);
+ 	s->prog = (SceGxmProgram *)vglMalloc(s->size);
++	if (!s->prog) return;
+ 	vgl_fast_memcpy((SceGxmProgram *)s->prog, buf, s->size);
+-	sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, s->prog, &s->id);
++	if (sceGxmProgramCheck(s->prog) < 0) { vgl_free((void *)s->prog); s->prog = NULL; return; }
++	uint32_t parameter_count = sceGxmProgramGetParameterCount(s->prog);
++	for (uint32_t i = 0; i < matrix_uniforms_num; i++) {
++		if (((uint32_t *)in)[i + 1] >= parameter_count) {
++			vgl_free((void *)s->prog); s->prog = NULL; return;
++		}
++	}
++	if (sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, s->prog, &s->id) < 0) {
++		vgl_free((void *)s->prog); s->prog = NULL; return;
++	}
+ 	s->unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(s->prog);
+ 	if (matrix_uniforms_num) {
+ 		uint32_t *_m = (uint32_t *)in + 1;
+ 		uint32_t *ptr = vglProgramGetParameterBase(s->prog);
+ 		for (int i = 0; i < matrix_uniforms_num; i++) {
+ 			matrix_uniform *m = vglMalloc(sizeof(matrix_uniform));
++			if (!m) {
++				while (s->mat) { matrix_uniform *next = s->mat->chain; vgl_free(s->mat); s->mat = next; }
++				vglVertexProgramCacheInvalidate(s->id);
++				vgl_free((void *)s->prog); s->prog = NULL; return;
++			}
+ 			m->chain = s->mat;
+ 			m->ptr = (SceGxmProgramParameter *)(ptr + _m[i] * 4);
+ 			s->mat = m;
+@@ -758,12 +773,44 @@
+ 
+ #ifdef HAVE_SHADER_CACHE
+ // Optional application diagnostics: 0 hit, 1 miss, 2 saved, 3 I/O error,
+-// 4 actual compiler invocation. No dependency on an application's logger.
++// 4 actual compiler invocation, 5 boot-prepared program consumed. No dependency on an application's logger.
+ void vgl_shader_cache_event(unsigned event) __attribute__((weak));
+ static void shader_cache_event(unsigned event) {
+   if (vgl_shader_cache_event) vgl_shader_cache_event(event);
+ }
++// Boot-time prepared programs are moved into the first matching GL shader.
++// No duplicate program, registration or source ownership is retained on use.
++#define PRELOADED_SHADER_BUDGET (8u * 1024u * 1024u)
++typedef struct preloaded_shader {
++  struct preloaded_shader *next;
++  char path[256];
++  size_t bytes;
++  shader value;
++} preloaded_shader;
++static preloaded_shader *preloaded_shaders;
++static size_t preloaded_shader_bytes;
++static GLboolean take_preloaded_shader(const char *path, shader *s, GLboolean bindings) {
++  if (!bindings) return GL_FALSE;
++  for (preloaded_shader **at = &preloaded_shaders; *at; at = &(*at)->next) {
++    preloaded_shader *entry = *at;
++    if (strcmp(entry->path, path)) continue;
++    shader *from = &entry->value;
++    s->semantics = from->semantics;
++#ifdef HAVE_GLSL_TEXTURE_SIZE
++    s->sized_samplers_num = from->sized_samplers_num;
++    memcpy(s->sized_samplers, from->sized_samplers, sizeof(s->sized_samplers));
++#endif
++    s->id = from->id; s->prog = from->prog; s->size = from->size;
++    s->unif_buf_size = from->unif_buf_size; s->mat = from->mat; s->unif_blk = from->unif_blk;
++    *at = entry->next;
++    preloaded_shader_bytes -= entry->bytes;
++    vgl_free(entry);
++    return GL_TRUE;
++  }
++  return GL_FALSE;
++}
+ static GLboolean load_cached_shader(const char *fname, shader *s, GLboolean bindings) {
++  if (take_preloaded_shader(fname, s, bindings)) { shader_cache_event(5); shader_cache_event(0); return GL_TRUE; }
+   SceUID fd = sceIoOpen(fname, SCE_O_RDONLY, 0777);
+   if (fd < 0) { shader_cache_event(1); return GL_FALSE; }
+   SceOff len = sceIoLseek(fd, 0, SCE_SEEK_END);
+@@ -807,6 +854,39 @@
+   else { shader_cache_event(3); shader_cache_event(1); if (corrupt) sceIoRemove(fname); }
+   return valid;
+ }
++const char *vglGetShaderCachePath(void) { return vgl_shader_cache_path; }
++// 1 prepared, 0 invalid/unavailable, -1 memory budget reached. Render thread only.
++int vglPreloadShaderCacheFile(const char *path, size_t file_bytes) {
++  size_t bytes = file_bytes + sizeof(preloaded_shader);
++  if (file_bytes > 1024 * 1024 || bytes > PRELOADED_SHADER_BUDGET - preloaded_shader_bytes) return -1;
++  if (strlen(path) >= sizeof(((preloaded_shader *)0)->path)) return 0;
++  for (preloaded_shader *p = preloaded_shaders; p; p = p->next)
++    if (!strcmp(p->path, path)) return 1;
++  preloaded_shader *entry = vglCalloc(1, sizeof(*entry));
++  if (!entry) return -1;
++  if (!load_cached_shader(path, &entry->value, GL_TRUE)) { vgl_free(entry); return 0; }
++  // Charge the program, record and allocated matrix metadata conservatively,
++  // including a file that grew between enumeration and opening.
++  if (entry->value.size > file_bytes) bytes = entry->value.size + sizeof(*entry);
++  for (matrix_uniform *m = entry->value.mat; m; m = m->chain) bytes += sizeof(*m);
++  if (bytes > PRELOADED_SHADER_BUDGET - preloaded_shader_bytes) {
++    release_shader(&entry->value); vgl_free(entry); return -1;
++  }
++  strcpy(entry->path, path); entry->bytes = bytes;
++  entry->next = preloaded_shaders; preloaded_shaders = entry;
++  preloaded_shader_bytes += bytes;
++  return 1;
++}
++void vglReleasePreloadedShaderCache(void) {
++  while (preloaded_shaders) {
++    preloaded_shader *entry = preloaded_shaders;
++    preloaded_shaders = entry->next;
++    release_shader(&entry->value);
++    vgl_free(entry);
++  }
++  preloaded_shader_bytes = 0;
++}
++
+ #endif
+ 
+ #ifdef HAVE_SHADER_CACHE
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1338,8 +1338,14 @@
+ // Simplified function to enable or disable V-Sync. For more fine granularity on the swap interval use eglSwapInterval.
+ void vglWaitVblankStart(GLboolean enable);
+ 
++// Render-thread boot warmup for existing disk shaders (HAVE_SHADER_CACHE).
++const char *vglGetShaderCachePath(void);
++int vglPreloadShaderCacheFile(const char *path, size_t file_bytes);
++void vglReleasePreloadedShaderCache(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+ 
+ #endif
++

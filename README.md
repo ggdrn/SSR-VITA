@@ -12,6 +12,24 @@ Play **Sonic Runners Revival** on your PlayStation Vita, with touchscreen and ph
 
 The game APK is not included. No OBB extraction is required. Required data downloads automatically and is saved locally. If a download fails, close the game and reopen it to retry.
 
+## Port settings
+
+Tap **SETTINGS** in the LiveArea to open the port menu on a black background,
+before the game loads. You can also hold **SELECT** when launching the game.
+Tap an option's left/right side to change it, or use the D-pad and **X**.
+Choose **Start Game** to save and launch with those settings, or **Exit** / **O**
+to save and return to the LiveArea. Opening SETTINGS while the game is running
+restarts the app into this menu. Low keeps the game's Light quality with half-size
+textures to preserve text readability. Material Shaders defaults to On and enables lighting, reflections and material
+variants. Set it to Off for simple diffuse rendering if a character looks corrupted.
+
+## Startup shader preparation
+
+Before the game starts, the port prepares shaders already present in its local
+cache and displays progress in English. On the first launch there may be no
+cache yet; it is created while playing. Preparation uses a bounded memory budget
+and leaves uncached or skipped shaders to the game's normal loading path.
+
 ## Controls
 
 | Vita input | Action |

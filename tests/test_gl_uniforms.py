@@ -38,8 +38,44 @@ def shader(name):
     return assets[a:assets.index(b'\0',a)].decode()
 harness += 'static const char original_character[] = ' + json.dumps(shader('Custom/ykChr_dme1')) + ';\n'
 harness += 'static const char original_outline[] = ' + json.dumps(shader('Custom/ykOutLine')) + ';\n'
+# Verify selection using separate GLES stages, as Unity actually submits them.
+# The downloaded cache is optional; the APK character and outline are mandatory.
+import re
+shader_texts = [shader('Custom/ykChr_dme1'), shader('Custom/ykOutLine')]
+cache = root.parent / 'data do jogo/files/UnityCache/Shared'
+for path in cache.rglob('*.sharedAssets'):
+    raw = path.read_bytes()
+    for match in re.finditer(rb'Shader "([^"\0]+)"', raw):
+        end = raw.index(b'\0', match.start())
+        text = raw[match.start():end].decode()
+        if text not in shader_texts:
+            shader_texts.append(text)
+checks = []
+expected = {'Custom/ykChr_dme1': 'character_vertex',
+            'Custom/ykChr_dmue1': 'scrolling_vertex',
+            'Custom/ykCmn_dme1': 'common_vertex'}
+for i, text in enumerate(shader_texts):
+    name = re.search(r'Shader "([^"]+)"', text)[1]
+    gles = re.search(r'"!!GLES\s+(.*?)#endif"', text, re.S)
+    # Extract through the fragment #endif (the first ends the vertex).
+    if not gles:
+        continue
+    start = gles.start()
+    end = text.index('#endif', text.index('#ifdef FRAGMENT', start))
+    body = text[start:end]
+    vertex = body.split('#ifdef VERTEX',1)[1].split('#endif',1)[0]
+    fragment = body.split('#ifdef FRAGMENT',1)[1]
+    for stage, source in [('VERTEX', vertex), ('FRAGMENT', fragment)]:
+        var = f'cache_{i}_{stage}'
+        harness += 'static const char ' + var + '[] = ' + json.dumps(source) + ';\n'
+        replacement = (expected[name] if stage == 'VERTEX' else 'character_fragment') if name in expected else var
+        checks.append(f'material_shaders = 1; assert(character_shader_source(GL_{stage}_SHADER, {var}) == {replacement});')
+        off = ('diffuse_vertex' if stage == 'VERTEX' else 'diffuse_fragment') if name in expected else var
+        checks.append(f'material_shaders = 0; assert(character_shader_source(GL_{stage}_SHADER, {var}) == {off});')
+harness += 'static void check_cached_stages(void) {\n' + '\n'.join(checks) + '\nmaterial_shaders = 1;\n}\n'
 harness += r'''
 int main(void) {
+  check_cached_stages();
   assert(glGetUniformLocation_bridge(1, "unity_LightColor[0]") == 0);
   assert(glGetUniformLocation_bridge(1, "unity_LightColor") == 0);
   assert(glGetUniformLocation_bridge(1, "_DifCol") == 1);
@@ -51,7 +87,7 @@ int main(void) {
   character_compat = 0;
   assert(character_shader_source(GL_VERTEX_SHADER, original_character) == original_character);
   locations_clear(1); locations_clear(2);
-  puts("PASS: array [0] alias, per-program locations, character shader selection, original mode");
+  puts("PASS: array [0] alias, per-program locations, separate shader stages, cache variants and glass/falloff exclusions, original mode");
 }
 '''
 with tempfile.TemporaryDirectory() as d:

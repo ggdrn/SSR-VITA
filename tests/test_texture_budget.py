@@ -10,6 +10,7 @@ with zipfile.ZipFile(root.parent/'srr224.apk') as apk:
 src=(root/'src/mono_probe.c').read_text();a=src.index('// Texture budget:');b=src.index('// Each WWW.texture',a)
 h=r'''
 #include <stdint.h>
+static void bundle_mips_set_limit(int level) {}
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>

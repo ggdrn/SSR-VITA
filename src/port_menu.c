@@ -1,5 +1,5 @@
 // Port settings screen, opened from the "Settings" button in the LiveArea
-// (target psla:settings) or by holding SELECT while the game starts. It runs before Unity is loaded, drawing with the CPU into its
+// (target psla:-settings) or by holding SELECT while the game starts. It runs before Unity is loaded, drawing with the CPU into its
 // own display buffer, and ends with "Start Game" or "Exit" (back to the
 // LiveArea). Settings are only applied at boot: changing them while Unity is
 // running caused visible glitches.
@@ -18,6 +18,7 @@
 #include <psp2/apputil.h>
 #include <psp2/ctrl.h>
 #include <psp2/display.h>
+#include <psp2/touch.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <vitaGL.h>
@@ -27,7 +28,6 @@ extern int DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_STRIDE;
 void gl_set_swap_interval(int interval);
 
 #define PORT_SETTINGS_PATH DATA_PATH "/port_settings.txt"
-#define CHARACTER_MARKER_PATH DATA_PATH "/original_character_shader"
 
 static const struct {
   int w, h;
@@ -39,30 +39,26 @@ static const struct {
 };
 
 static struct {
-  int resolution, quality, fps, fps_counter, character_original;
-} cfg = {PORT_RES_QHD, PORT_QUALITY_MEDIUM, 60, 0, 0};
+  int resolution, quality, fps, fps_counter, material_shaders;
+} cfg = {PORT_RES_QHD, PORT_QUALITY_DEFAULT, 60, 0, 1};
 
 int port_screen_w = SCREEN_MAX_W, port_screen_h = SCREEN_MAX_H;
 
+int port_material_shaders(void) { return cfg.material_shaders; }
 int port_quality(void) { return cfg.quality; }
 // Unity's own levels in this APK: 0 Fastest (the game's Light Mode), 1 Fast
 // (the game's Normal), 2 Simple, 3 Good, 4 Beautiful, 5 Fantastic.
-int port_unity_quality_level(void) { return cfg.quality == PORT_QUALITY_LOW ? 0 : cfg.quality == PORT_QUALITY_HIGH ? 2 : 1; }
-// masterTextureLimit 1 (half size) is the memory cap the port has always used.
-int port_texture_limit(void) { return cfg.quality == PORT_QUALITY_LOW ? 2 : 1; }
+int port_unity_quality_level(void) { return cfg.quality == PORT_QUALITY_LOW ? 0 : 1; }
+// Keep the half-size texture budget even in Light mode. Quarter-size font
+// atlases lose too much glyph detail; the engine quality level stays Low.
+int port_texture_limit(void) { return 1; }
 int port_target_fps(void) { return cfg.fps; }
-int port_character_shader_original(void) { return cfg.character_original; }
 
 // --- Settings file ----------------------------------------------------------
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 void port_settings_load(void) {
-  FILE *marker = fopen(CHARACTER_MARKER_PATH, "rb");
-  if (marker) {
-    cfg.character_original = 1;  // Older opt-in kept as the default.
-    fclose(marker);
-  }
   FILE *f = fopen(PORT_SETTINGS_PATH, "r");
   if (f) {
     char line[96];
@@ -74,14 +70,14 @@ void port_settings_load(void) {
       else if (!strcmp(key, "graphics")) cfg.quality = clamp(value, 0, PORT_QUALITY_COUNT - 1);
       else if (!strcmp(key, "fps")) cfg.fps = value == 30 ? 30 : 60;
       else if (!strcmp(key, "fps_counter")) cfg.fps_counter = !!value;
-      else if (!strcmp(key, "character_shader_original")) cfg.character_original = !!value;
+      else if (!strcmp(key, "material_shaders")) cfg.material_shaders = !!value;
     }
     fclose(f);
   }
   port_screen_w = resolutions[cfg.resolution].w;
   port_screen_h = resolutions[cfg.resolution].h;
-  L_INFO("port: settings %s, graphics %d, %d fps, fps counter %d, character shader %s", resolutions[cfg.resolution].name,
-         cfg.quality, cfg.fps, cfg.fps_counter, cfg.character_original ? "original" : "compatible");
+  L_INFO("port: settings %s, graphics %d, %d fps, fps counter %d, material shaders %s", resolutions[cfg.resolution].name,
+         cfg.quality, cfg.fps, cfg.fps_counter, cfg.material_shaders ? "on" : "off");
 }
 
 static void settings_save(void) {
@@ -90,8 +86,8 @@ static void settings_save(void) {
     L_WARN("port: could not write " PORT_SETTINGS_PATH);
     return;
   }
-  fprintf(f, "resolution=%d\ngraphics=%d\nfps=%d\nfps_counter=%d\ncharacter_shader_original=%d\n", cfg.resolution,
-          cfg.quality, cfg.fps, cfg.fps_counter, cfg.character_original);
+  fprintf(f, "resolution=%d\ngraphics=%d\nfps=%d\nfps_counter=%d\nmaterial_shaders=%d\n", cfg.resolution,
+          cfg.quality, cfg.fps, cfg.fps_counter, cfg.material_shaders);
   fclose(f);
 }
 
@@ -122,6 +118,41 @@ static void draw_text(uint32_t *fb, int stride, int x, int y, int g, const char 
   }
 }
 
+// --- Shader cache preparation screen (before Unity starts) -------------------
+static unsigned shader_phase, shader_done, shader_total, shader_prepared;
+static void shader_progress_callback(void *framebuf) {
+  int w = DISPLAY_WIDTH, h = DISPLAY_HEIGHT, stride = DISPLAY_STRIDE;
+  int g = w * 20 / 960;
+  draw_rect(framebuf, stride, 0, 0, w, h, RGB(0, 0, 0));
+  const char *title = shader_phase == 0 ? "Scanning shader cache..." :
+                      !shader_total ? "No cached shaders yet." :
+                      shader_phase == 2 ? "Shader preparation complete" : "Preparing cached shaders...";
+  int x = (w - (int)strlen(title) * g) / 2;
+  draw_text(framebuf, stride, x, h / 2 - 60, g, title, RGB(255, 205, 40));
+  if (shader_total) {
+    char text[72];
+    snprintf(text, sizeof(text), "%u / %u  (%u%%)", shader_done, shader_total, (unsigned)((uint64_t)shader_done * 100 / shader_total));
+    draw_text(framebuf, stride, (w - (int)strlen(text) * g) / 2, h / 2 - 15, g, text, RGB(235, 235, 235));
+    int bar = w * 3 / 4;
+    draw_rect(framebuf, stride, w / 8, h / 2 + 25, bar, 14, RGB(48, 48, 48));
+    draw_rect(framebuf, stride, w / 8, h / 2 + 25, (int)((uint64_t)bar * shader_done / shader_total), 14, RGB(255, 205, 40));
+    snprintf(text, sizeof(text), "%u prepared - %u skipped", shader_prepared, shader_done - shader_prepared);
+    draw_text(framebuf, stride, (w - (int)strlen(text) * (g * 3 / 4)) / 2, h / 2 + 60, g * 3 / 4, text, RGB(180, 190, 205));
+  } else if (shader_phase != 0) {
+    const char *text = "The cache will be created while you play.";
+    int small = g * 3 / 4;
+    draw_text(framebuf, stride, (w - (int)strlen(text) * small) / 2, h / 2, small, text, RGB(180, 190, 205));
+  }
+}
+void port_shader_progress(unsigned phase, unsigned done, unsigned total, unsigned prepared) {
+  if (phase == 3) { vglSetDisplayCallback(NULL); return; }
+  shader_phase = phase; shader_total = total;
+  shader_done = done > total ? total : done;
+  shader_prepared = prepared > shader_done ? shader_done : prepared;
+  vglSetDisplayCallback(shader_progress_callback);
+  vglSwapBuffers(0);
+}
+
 // --- In-game FPS counter ------------------------------------------------------
 
 static void fps_display_callback(void *framebuf) {
@@ -150,19 +181,19 @@ void port_menu_init(void) {
 
 // --- Settings screen (before the game loads) ----------------------------------
 
-enum { ROW_RESOLUTION, ROW_GRAPHICS, ROW_FPS, ROW_FPS_COUNTER, ROW_CHARACTER, ROW_START, ROW_EXIT, ROW_COUNT };
+enum { ROW_RESOLUTION, ROW_GRAPHICS, ROW_MATERIAL_SHADERS, ROW_FPS, ROW_FPS_COUNTER, ROW_START, ROW_EXIT, ROW_COUNT };
 
-static const char *const row_names[ROW_COUNT] = {"Resolution", "Graphics", "Frame Rate", "FPS Counter",
-                                                 "Character Shader", "Start Game", "Exit"};
-static const char *const quality_names[] = {"Low", "Medium", "High"};
+static const char *const row_names[ROW_COUNT] = {"Resolution", "Graphics", "Material Shaders", "Frame Rate", "FPS Counter",
+                                                 "Start Game", "Exit"};
+static const char *const quality_names[] = {"Low", "Default"};
 
 static void row_value(int row, char *out, size_t size) {
   switch (row) {
   case ROW_RESOLUTION: snprintf(out, size, "%s", resolutions[cfg.resolution].name); break;
   case ROW_GRAPHICS: snprintf(out, size, "%s", quality_names[cfg.quality]); break;
+  case ROW_MATERIAL_SHADERS: snprintf(out, size, "%s", cfg.material_shaders ? "On" : "Off"); break;
   case ROW_FPS: snprintf(out, size, "%d FPS", cfg.fps); break;
   case ROW_FPS_COUNTER: snprintf(out, size, "%s", cfg.fps_counter ? "On" : "Off"); break;
-  case ROW_CHARACTER: snprintf(out, size, "%s", cfg.character_original ? "Original" : "Compatible"); break;
   default: out[0] = 0;
   }
 }
@@ -172,13 +203,11 @@ static const char *row_hint(int row) {
   case ROW_RESOLUTION:
     return cfg.resolution == PORT_RES_QHD ? "Native Vita resolution." : "Rendered smaller, upscaled. Faster GPU.";
   case ROW_GRAPHICS:
-    return cfg.quality == PORT_QUALITY_LOW ? "Game's Light quality. Quarter-size textures."
-           : cfg.quality == PORT_QUALITY_HIGH ? "Unity 'Simple' level: sharper filtering."
+    return cfg.quality == PORT_QUALITY_LOW ? "Light quality. Readable half-size textures."
                                               : "Game's Normal quality. Half-size textures.";
+  case ROW_MATERIAL_SHADERS: return cfg.material_shaders ? "Lighting, reflections and material variants." : "Off: simple diffuse rendering.";
   case ROW_FPS: return cfg.fps == 30 ? "Locked to 30 FPS with even frame pacing." : "Targets 60 FPS.";
   case ROW_FPS_COUNTER: return "Shows frames per second in the corner.";
-  case ROW_CHARACTER:
-    return cfg.character_original ? "The game's original env-map shader." : "Stable diffuse shading (recommended).";
   case ROW_START: return "Save and start the game.";
   case ROW_EXIT: return "Save and return to the LiveArea.";
   default: return "";
@@ -189,9 +218,9 @@ static void change(int row, int dir) {
   switch (row) {
   case ROW_RESOLUTION: cfg.resolution = (cfg.resolution + dir + PORT_RES_COUNT) % PORT_RES_COUNT; break;
   case ROW_GRAPHICS: cfg.quality = (cfg.quality + dir + PORT_QUALITY_COUNT) % PORT_QUALITY_COUNT; break;
+  case ROW_MATERIAL_SHADERS: cfg.material_shaders = !cfg.material_shaders; break;
   case ROW_FPS: cfg.fps = cfg.fps == 60 ? 30 : 60; break;
   case ROW_FPS_COUNTER: cfg.fps_counter = !cfg.fps_counter; break;
-  case ROW_CHARACTER: cfg.character_original = !cfg.character_original; break;
   default: return;
   }
   settings_save();
@@ -202,22 +231,26 @@ static void change(int row, int dir) {
 #define G 20      // glyph size in pixels
 #define LINE 34   // row height
 
+static int row_y(int row) {
+  return 100 + row * LINE + (row >= ROW_START ? LINE / 2 : 0);
+}
+
+static int row_at(int x, int y) {
+  if (x < 30 || x >= FB_W - 30) return -1;
+  for (int row = 0; row < ROW_COUNT; row++)
+    if (y >= row_y(row) - 7 && y < row_y(row) - 7 + LINE) return row;
+  return -1;
+}
+
 static void draw_screen(uint32_t *fb, int selected) {
-  // Background: vertical blue gradient.
-  for (int y = 0; y < FB_H; y++) {
-    uint32_t c = RGB(8, 24 + y * 40 / FB_H, 70 + y * 60 / FB_H);
-    uint32_t *p = fb + y * FB_W;
-    for (int x = 0; x < FB_W; x++) p[x] = c;
-  }
-  draw_rect(fb, FB_W, 0, 0, FB_W, 70, RGB(10, 20, 50));
+  draw_rect(fb, FB_W, 0, 0, FB_W, FB_H, RGB(0, 0, 0));
   draw_rect(fb, FB_W, 0, 70, FB_W, 3, RGB(255, 205, 40));
   draw_text(fb, FB_W, 40, 25, G, "SONIC RUNNERS REVIVAL", RGB(255, 205, 40));
-  draw_text(fb, FB_W, 40 + 22 * G, 25, G, "- SETTINGS", RGB(235, 235, 235));
+  draw_text(fb, FB_W, 40 + 22 * G, 25, G, "- PORT MENU", RGB(235, 235, 235));
 
-  int y = 100;
   for (int i = 0; i < ROW_COUNT; i++) {
-    if (i == ROW_START) y += LINE / 2;
-    if (i == selected) draw_rect(fb, FB_W, 30, y - 7, FB_W - 60, LINE, RGB(40, 80, 170));
+    int y = row_y(i);
+    if (i == selected) draw_rect(fb, FB_W, 30, y - 7, FB_W - 60, LINE, RGB(48, 48, 48));
     uint32_t color = i == selected ? RGB(255, 255, 255) : RGB(200, 210, 230);
     draw_text(fb, FB_W, 50, y, G, row_names[i], color);
     char value[32];
@@ -228,34 +261,37 @@ static void draw_screen(uint32_t *fb, int selected) {
       draw_text(fb, FB_W, vx, y, G, value, color);
       if (i == selected) draw_text(fb, FB_W, vx + 13 * G, y, G, ">", RGB(255, 205, 40));
     }
-    y += LINE;
   }
   draw_rect(fb, FB_W, 0, FB_H - 92, FB_W, 3, RGB(255, 205, 40));
-  draw_rect(fb, FB_W, 0, FB_H - 89, FB_W, 89, RGB(10, 20, 50));
-  draw_text(fb, FB_W, 40, FB_H - 72, G, row_hint(selected), RGB(150, 190, 255));
-  draw_text(fb, FB_W, 40, FB_H - 36, 16, "UP/DOWN select   LEFT/RIGHT change   X confirm   O exit", RGB(150, 150, 150));
+  draw_rect(fb, FB_W, 0, FB_H - 89, FB_W, 89, RGB(0, 0, 0));
+  draw_text(fb, FB_W, 40, FB_H - 72, G, row_hint(selected), RGB(200, 200, 200));
+  draw_text(fb, FB_W, 40, FB_H - 36, 16, "Tap to change/play   D-pad select/change   X OK   O exit", RGB(150, 150, 150));
 }
 
-// A LiveArea "psla:<arg>" target launches (or resumes) this app and hands it
-// <arg> as an AppUtil event.
-static int livearea_settings_event(void) {
+// Match the LiveArea launch option format used by GTA SA Vita (psla:-config).
+// This runs before APK/Unity loading; the engine starts only after Start Game.
+static int livearea_settings_event(int startup) {
   SceAppUtilAppEventParam event;
   memset(&event, 0, sizeof(event));
-  if (sceAppUtilReceiveAppEvent(&event) < 0) return 0;
-  char arg[1024];
+  int received = sceAppUtilReceiveAppEvent(&event);
+  if (startup || event.type)
+    L_INFO("port: AppUtil receive=0x%08X type=0x%X", received, event.type);
+  if (received < 0 || event.type != 0x05) return 0;
+  char arg[2048];
   memset(arg, 0, sizeof(arg));
-  if (sceAppUtilAppEventParseLiveArea(&event, arg) < 0) return 0;
-  L_INFO("port: LiveArea event 0x%X \"%s\"", event.type, arg);
-  return strstr(arg, "settings") != NULL;
+  int parsed = sceAppUtilAppEventParseLiveArea(&event, arg);
+  arg[sizeof(arg) - 1] = 0;
+  L_INFO("port: LiveArea parse=0x%08X argument=\"%s\"", parsed, arg);
+  return parsed >= 0 && strstr(arg, "settings") != NULL;
 }
 
 int port_settings_requested(int argc, char *argv[]) {
   for (int i = 0; i < argc; i++)
-    if (argv[i] && !strcmp(argv[i], "settings")) {
+    if (argv[i] && (!strcmp(argv[i], "settings") || !strcmp(argv[i], "-settings"))) {
       L_INFO("port: settings requested on restart");
       return 1;
     }
-  if (livearea_settings_event()) {
+  if (livearea_settings_event(1)) {
     L_INFO("port: settings requested from the LiveArea");
     return 1;
   }
@@ -271,6 +307,7 @@ int port_settings_requested(int argc, char *argv[]) {
     L_INFO("port: settings requested by holding SELECT");
     return 1;
   }
+  L_INFO("port: normal launch; no settings request detected");
   return 0;
 }
 
@@ -278,12 +315,12 @@ int port_settings_requested(int argc, char *argv[]) {
 // resumes it): restart into the settings screen, since settings only apply at
 // boot.
 void port_settings_poll(void) {
-  if (!livearea_settings_event()) return;
+  if (!livearea_settings_event(0)) return;
   L_INFO("port: restarting into the settings screen");
   log_finish();
   static char arg[] = "settings";
   char *const argv[] = {arg, NULL};
-  int r = sceAppMgrLoadExec("app0:eboot.bin", argv, NULL);
+  int r = sceAppMgrLoadExec("app0:/eboot.bin", argv, NULL);
   L_WARN("port: restart failed (0x%08X)", r);
 }
 
@@ -293,7 +330,8 @@ int port_settings_screen(void) {
   void *base = NULL;
   if (block < 0 || sceKernelGetMemBlockBase(block, &base) < 0) {
     L_WARN("port: no display memory for the settings screen (0x%08X)", block);
-    return 1;
+    if (block >= 0) sceKernelFreeMemBlock(block);
+    return 0;  // A failed settings screen must never silently start the game.
   }
   SceDisplayFrameBuf fb;
   memset(&fb, 0, sizeof(fb));
@@ -304,7 +342,13 @@ int port_settings_screen(void) {
   fb.width = FB_W;
   fb.height = FB_H;
 
-  int selected = 0, result = -1;
+  // Ignore a finger still held from the LiveArea launch. Activate on release
+  // in the same row; restore the sampling state before handing off to Unity.
+  SceTouchSamplingState touch_state = SCE_TOUCH_SAMPLING_STATE_STOP;
+  sceTouchGetSamplingState(SCE_TOUCH_PORT_FRONT, &touch_state);
+  int touch_ready = sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START) >= 0;
+  int touch_armed = 0, touch_row = -1, touch_id = -1, touch_dir = 1;
+  int selected = ROW_START, result = -1;
   uint32_t prev = ~0u;  // Ignore buttons still held from the launch.
   uint64_t repeat_at = 0;
   draw_screen(base, selected);
@@ -327,7 +371,38 @@ int port_settings_screen(void) {
       act |= buttons & vertical;
       repeat_at = now + 120000;
     }
-    if (!act) continue;
+    int previous_selection = selected;
+    int tapped = -1;
+    SceTouchData touch;
+    memset(&touch, 0, sizeof(touch));
+    if (touch_ready && sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) > 0) {
+      if (!touch.reportNum) {
+        if (touch_armed) tapped = touch_row;
+        touch_armed = 1;
+        touch_row = touch_id = -1;
+      } else if (touch_armed) {
+        // Vita front touch coordinates are twice the native display size.
+        int x = touch.report[0].x / 2, y = touch.report[0].y / 2;
+        int row = row_at(x, y);
+        if (touch_id < 0 && touch.reportNum == 1) {
+          touch_id = touch.report[0].id;
+          touch_row = row;
+          touch_dir = x < 480 ? -1 : 1;
+          if (row >= 0) selected = row;
+        } else if (touch.reportNum != 1 || touch.report[0].id != touch_id || row != touch_row) {
+          // Dragging out of a row or using multiple fingers cancels the tap.
+          touch_row = -1;
+          touch_armed = 0;
+        }
+      }
+    }
+    if (tapped >= 0) {
+      selected = tapped;
+      if (tapped == ROW_START) result = 1;
+      else if (tapped == ROW_EXIT) result = 0;
+      else change(tapped, touch_dir);
+    }
+    if (!act && tapped < 0 && selected == previous_selection) continue;
     if (act & SCE_CTRL_UP) selected = (selected + ROW_COUNT - 1) % ROW_COUNT;
     if (act & SCE_CTRL_DOWN) selected = (selected + 1) % ROW_COUNT;
     if (act & SCE_CTRL_LEFT) change(selected, -1);
@@ -341,6 +416,7 @@ int port_settings_screen(void) {
     draw_screen(base, selected);
   }
 
+  if (touch_ready) sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, touch_state);
   settings_save();
   port_screen_w = resolutions[cfg.resolution].w;
   port_screen_h = resolutions[cfg.resolution].h;

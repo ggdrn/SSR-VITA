@@ -72,6 +72,7 @@ add_executable(${PROJECT_NAME}
   src/util/splash_art.c
   src/util/gc_trace.c
   src/util/gc_policy.c
+  src/util/shader_warmup.c
   src/util/bundle_mips.c
   src/util/log.c
   src/util/apk.c

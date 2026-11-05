@@ -1,0 +1,67 @@
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -374,6 +374,37 @@
+ #endif
+ } program;
+ 
++// A skinned mesh can interleave position/normal while keeping UVs in a
++// separate array. Checking only attr_map[1] misclassifies the whole mesh as
++// packed and makes later attributes read outside the copied vertex block.
++static GLboolean vertex_streams_are_packed(const program *p) {
++	if (p->attr_num < 2) return GL_FALSE;
++	uint8_t first = p->attr_map[0];
++	if (!(cur_vao->vertex_attrib_state & (1u << first))) return GL_FALSE;
++	uint32_t base = cur_vao->vertex_attrib_offsets[first];
++	uint32_t buffer = cur_vao->vertex_attrib_vbo[first];
++	uint32_t stride = cur_vao->vertex_stream_config[first].stride;
++	if (!stride) return GL_FALSE;
++	for (unsigned i = 1; i < p->attr_num; i++) {
++		uint8_t index = p->attr_map[i];
++		if (!(cur_vao->vertex_attrib_state & (1u << index))) continue;
++		uint32_t offset = cur_vao->vertex_attrib_offsets[index];
++		if (cur_vao->vertex_attrib_vbo[index] != buffer ||
++			cur_vao->vertex_stream_config[index].stride != stride ||
++			offset < base || offset - base >= stride) {
++			static unsigned split_reports;
++			if (split_reports < 8) {
++				split_reports++;
++				vgl_log("gl: split vertex streams: attr %u stride %u buffer %u; base attr %u stride %u buffer %u; using separate streams\n",
++					index, cur_vao->vertex_stream_config[index].stride, cur_vao->vertex_attrib_vbo[index],
++					first, stride, buffer);
++			}
++			return GL_FALSE;
++		}
++	}
++	return GL_TRUE;
++}
++
+ #if defined(HAVE_VERTEX_LAYOUT_CACHE) && !defined(STRICT_DRAW_COMPLIANCE) && !defined(DRAW_SPEEDHACK)
+ enum {
+ 	VERTEX_LAYOUT_MULTI_DRAW,
+@@ -1034,7 +1065,7 @@
+ 			}
+ 		}
+ #ifndef STRICT_DRAW_COMPLIANCE
+-		if (is_packed && (!(cur_vao->vertex_attrib_offsets[p->attr_map[0]] + streams[0].stride > cur_vao->vertex_attrib_offsets[p->attr_map[1]] && cur_vao->vertex_attrib_offsets[p->attr_map[1]] > cur_vao->vertex_attrib_offsets[p->attr_map[0]])))
++		if (is_packed && !vertex_streams_are_packed(p))
+ 			is_packed = GL_FALSE;
+ 	}
+ #endif
+@@ -1291,7 +1322,7 @@
+ 			}
+ 		}
+ #ifndef STRICT_DRAW_COMPLIANCE
+-		if (is_packed && (!(cur_vao->vertex_attrib_offsets[p->attr_map[0]] + streams[0].stride > cur_vao->vertex_attrib_offsets[p->attr_map[1]] && cur_vao->vertex_attrib_offsets[p->attr_map[1]] > cur_vao->vertex_attrib_offsets[p->attr_map[0]])))
++		if (is_packed && !vertex_streams_are_packed(p))
+ 			is_packed = GL_FALSE;
+ 	}
+ #endif
+@@ -1599,7 +1630,7 @@
+ 			}
+ 		}
+ #ifndef STRICT_DRAW_COMPLIANCE
+-		if (is_packed && (!(cur_vao->vertex_attrib_offsets[p->attr_map[0]] + streams[0].stride > cur_vao->vertex_attrib_offsets[p->attr_map[1]] && cur_vao->vertex_attrib_offsets[p->attr_map[1]] > cur_vao->vertex_attrib_offsets[p->attr_map[0]])))
++		if (is_packed && !vertex_streams_are_packed(p))
+ 			is_packed = GL_FALSE;
+ 	} else if (!target_vbo)
+ 		is_full_vbo = GL_FALSE;
